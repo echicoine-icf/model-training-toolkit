@@ -62,6 +62,12 @@ def wizard(config, *,previous=None):
     mods=entry('LoRA target modules (comma-separated)',','.join(old_lora['target_modules']),lambda v:[x.strip() for x in v.split(',')], 'Provide one or more module names',check=lambda x:bool(x) and all(x))
     l['target_modules']=mods
     c['lora']=l
+    c['min_learning_rate']=entry('Minimum learning rate (absolute cosine floor)',current.get('min_learning_rate',current['learning_rate']*0.1),float,'Enter >0 and <= peak LR',check=lambda v:0<v<=c['learning_rate'])
+    c['precision']=entry('Precision (auto/bf16/fp16)',current.get('precision','auto'),str,'Enter auto, bf16, or fp16',check=lambda v:v in ('auto','bf16','fp16'))
+    c['attention_implementation']=entry('Attention implementation (sdpa/eager/flash_attention_2)',current.get('attention_implementation','sdpa'),str,'Enter supported attention backend',check=lambda v:v in ('sdpa','eager','flash_attention_2'))
+    c['optimizer']=entry('Optimizer (fused-adamw/adamw)',current.get('optimizer','fused-adamw'),str,'Enter fused-adamw or adamw',check=lambda v:v in ('fused-adamw','adamw'))
+    c['gradient_checkpointing']=yesno('Use gradient checkpointing?',current.get('gradient_checkpointing',True))
+    c['save_every']=entry('Save adapter checkpoint every N steps (0=final only)',current.get('save_every',0),int,'Enter >=0',check=lambda v:v>=0)
     auto=yesno('Evaluate automatically after successful training?','auto_evaluate_default' in config.get('workflow',{}) and config['workflow']['auto_evaluate_default'])
     print('\nFINAL RUN PLAN (recorded in the run manifest)')
     import json

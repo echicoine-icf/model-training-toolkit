@@ -1,3 +1,13 @@
+## v0.3.4 — LoRA architecture verification and training reproducibility
+
+- Honor arbitrary CLI LoRA target-module lists; verify exact PEFT matched-layer coverage before optimization.
+- Record LoRA target names, matched layer counts, trainable parameter count, effective precision/attention/optimizer/LR schedule, checkpoint behavior, and prompt/tokenizer hashes.
+- Add explicit minimum cosine learning rate, BF16/FP16 precision, attention backend, gradient checkpointing, and intermediate adapter checkpoint controls.
+- Preserve original validated assistant message text rather than reserializing training JSON targets.
+- Correct gradient accumulation optimizer-step counting across epoch boundaries.
+- Add unit tests that fail on partial/extra target modules, output mismatches, and training-option regressions.
+- No changes to project datasets, evaluation datasets, or existing training runs.
+
 ## 0.3.3
 
 - Training supports noninteractive, explicit CLI flags for every hyperparameter and auto-eval policy; `--yes` required.

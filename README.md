@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.3
+# Model Training Toolkit v0.3.4
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -121,3 +121,28 @@ bash workspace.sh train eli v9.0 \
 Switch `--no-auto-eval` to `--auto-eval` to require an evaluation dataset and automatically run evaluation after successful training. The command fails before creating a run if any flag is missing, conflicting, or invalid. **These values are examples, not ELI-specific recommendations.** The fixed model remains defined at version creation. A fully parameterized run is recorded in a frozen run snapshot. `--yes` explicitly authorizes execution without prompts.
 
 The project-local entrypoint also accepts flags after the version: `bash projects/eli/project.sh train v9.0 [FLAGS...]`. Existing project launchers are refreshed by `bash workspace.sh upgrade`.
+
+
+## Architecture-audited training (v0.3.4)
+
+Single-command training also supports `--min-learning-rate`, `--precision`,
+`--attention-implementation`, `--optimizer`, `--gradient-checkpointing`
+(or `--no-gradient-checkpointing`), and `--save-every`.
+Every run records the **actual** PEFT-adapted layer paths, per-target counts,
+trainable and total parameters, attention, precision, scheduler, optimizer,
+prompt/tokenizer hashes, and runtime environment in `training_plan.json`
+**before the first optimizer update**. Requested target modules must all match;
+missing or unexpected PEFT LoRA targets abort the run.
+
+If a dataset provides validated `messages` with system/user/assistant text,
+that exact approved assistant text is used for loss masking and tokenization;
+it is not silently regenerated from `expected`.
+
+Intermediate checkpoints contain **adapter weights and tokenizer only**;
+optimizer/RNG state resume is **not yet supported** by this general-purpose
+backend. A new launch always starts fresh, creates a new run ID, and does not
+replace older runs. `--no-auto-eval` is recommended for work requiring semantic
+rather than exact-JSON evaluation until a suitable evaluator is installed.
+
+See `docs/V80_TRAINING_COMPARISON.md` for a precise comparison with the ELI
+V8.0 reference trainer supplied for the audit.
