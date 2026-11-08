@@ -1,9 +1,9 @@
 # Model Training Toolkit — Agent Operating Guide
 
-**Applies to:** Model Training Toolkit v0.3.5 (the code in this repository).  
+**Applies to:** Model Training Toolkit v0.3.6 (the code in this repository).  
 **Purpose:** Give a coding agent enough verified context to install a workspace, register projects and model versions, create version-specific training/evaluation packages, execute runs, and hand work to another agent **without inventing version-specific training scripts**.
 
-> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents v0.3.5, not hypothetical future capabilities. If the installed toolkit version differs, inspect its implementation first.
+> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents v0.3.6, not hypothetical future capabilities. If the installed toolkit version differs, inspect its implementation first.
 
 ## 1. Architecture and ownership
 
@@ -185,7 +185,7 @@ Before launch: confirm project/version, correct base model and revision, `mtt-da
 - Training uses the declared **fresh base** plus PEFT LoRA with PyTorch/Transformers. It **does not** continue from the previous adapter.
 - Successful training saves an adapter and records a trained run; `--auto-eval` then evaluates it if eval data was supplied. An evaluation failure should not erase trained weights.
 - Every run freezes version/config/data inputs with SHA-256. Retain the frozen snapshot, logs and run metadata.
-- This toolkit currently supports **LoRA on compatible causal LMs with NVIDIA CUDA**, not QLoRA, full-model training, distributed training, or arbitrary architectures. No optimizer-state resume is guaranteed.
+- This toolkit currently supports **LoRA on compatible causal LMs with NVIDIA CUDA**, not QLoRA, full-model training, distributed training, or arbitrary architectures. Optimizer/RNG-resumable checkpoints are supported on v0.3.6+ runs; see `docs/RESUMABLE_CHECKPOINTS.md`.
 
 ## 7. Evaluate, export, inspect and hand off
 
@@ -229,6 +229,10 @@ Read these in order:
 
 **Initial agent response in a new chat:** State the detected toolkit version, project/version, selected base model, current dataset readiness, last completed run and evaluation status, and the *single next executable action*. If any of those facts are unavailable, say so rather than guessing.
 
-## Optional Unsloth training backend (v0.3.5)
+## Optional Unsloth training backend (v0.3.6)
 
 Read `docs/UNSLOTH_BACKEND.md` before enabling Unsloth. The default `--backend pytorch` never imports it. With `--backend unsloth`, MTT uses Unsloth for fresh-base full-precision model loading and PEFT initialization but retains the shared loss masking, optimizer, LR schedule, and output contract. Do not claim GPU compatibility, parity, or speedup until tested on the target installation. Import Unsloth **before** Torch/Transformers/PEFT when selected; never silently fall back to PyTorch. Do not change a frozen project's data package just to enable a backend. A new run may use the same immutable inputs.
+
+## 10. Checkpoint recovery (v0.3.6+)
+
+Use `--save-every 500 --keep-last-checkpoints 3` in new one-shot training commands unless the user explicitly chooses another interval. These are **full optimizer and RNG checkpoints**, not adapter-only. After an interrupted run, **do not start a new `train` command**: recover the original run using `bash workspace.sh resume PROJECT VERSION --run RUN_ID` or `bash projects/PROJECT/project.sh resume VERSION --run RUN_ID`. This uses frozen inputs and the original configuration; no new hyperparameters are allowed. An older retained checkpoint can be selected with `--checkpoint step_0000500`. Never alter the snapshot, state files, or original data to force a resume. See `docs/RESUMABLE_CHECKPOINTS.md` for integrity checks and trusted-checkpoint restrictions. v0.3.5-era adapter-only snapshots cannot recover optimizer state.

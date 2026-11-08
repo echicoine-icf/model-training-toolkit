@@ -12,7 +12,7 @@ from toolkit.run_wizard import wizard as training_wizard
 from toolkit.data_package import initialize, inspect, validate_package, assistant_wizard, migrate_legacy
 
 
-PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|evaluate VERSION [--run ID]|status|handoff}\' ;;\nesac\n'
+PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|status|handoff}\' ;;\nesac\n'
 
 def scaffold_project_launcher(dest):
     dest=Path(dest)
@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.5'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.6'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.5','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.6','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -243,9 +243,13 @@ def explicit_training_config(args):
     require(not (ck and no_ck),'Choose only one of --gradient-checkpointing and --no-gradient-checkpointing')
     controls['gradient_checkpointing'] = False if no_ck else True
     save_every = getattr(args,'save_every',None)
-    save_every = 0 if save_every is None else save_every
+    save_every = 500 if save_every is None else save_every
     require(save_every >= 0,'--save-every must be >=0')
     controls['save_every'] = save_every
+    keep_last = getattr(args,'keep_last_checkpoints',None)
+    keep_last = 3 if keep_last is None else keep_last
+    require(keep_last >= 0,'--keep-last-checkpoints must be >=0 (0 keeps all)')
+    controls['keep_last_checkpoints'] = keep_last
     controls['backend'] = getattr(args,'backend',None) or 'pytorch'
     require(controls['backend'] in ('pytorch','unsloth'),
             '--backend must be pytorch or unsloth')
@@ -307,6 +311,7 @@ def train(project,version,*,guided=True,train_args=None):
     meta.update({'reviewed_training':True,'auto_evaluate':auto_eval,'run_configuration':{'training':controls,'base_model':read(folder/'input/version.json')['base_model']}})
     write(folder/'run.json',meta)
     meta=update_run(folder,meta,'training')
+    print('TRAINING RUN ID:',meta['run_id'],'(save this ID for resume)',flush=True)
     try:
         from toolkit.train_engine import run as engine
         frozen=subprocess.check_output([sys.executable,'-m','pip','freeze'],text=True)
@@ -322,10 +327,60 @@ def train(project,version,*,guided=True,train_args=None):
                 print('AUTO-EVALUATION FAILED:',str(ex),file=sys.stderr)
                 raise
         print('RUN FINISHED:',meta['run_id'])
+    except KeyboardInterrupt:
+        current=read(folder/'run.json')
+        if current['status']=='training':update_run(folder,current,'interrupted',{'error':'KeyboardInterrupt'})
+        raise
     except Exception as exc:
         current=read(folder/'run.json')
         if current['status']=='training':update_run(folder,current,'failed',{'error':str(exc)})
         raise
+
+
+def resume(project,version,run_id,*,checkpoint='latest'):
+    """Resume an interrupted existing run without creating new inputs or hyperparameters."""
+    from toolkit.checkpoints import select_checkpoint, training_lock
+    folder=run_path(project,version,run_id)
+    require((folder/'run.json').is_file(),f'Unknown run: {run_id}')
+    meta=read(folder/'run.json')
+    require(meta.get('project')==project and meta.get('version')==version,
+            'Run identity does not match requested project and version')
+    require(meta.get('run_kind','training')=='training','Cannot resume a base-only run')
+    require(meta['status'] in ('training','failed','interrupted'),
+            f'Run status {meta["status"]!r} is not resumable')
+    require(not (folder/'training_result.json').exists(),
+            'Training already completed; cannot restart the same run')
+    frozen=folder/'input'
+    assert_snapshot(frozen)
+    selected=select_checkpoint(folder,checkpoint)  # Fail before changing status or loading GPU
+    require((folder/'training_plan.json').is_file(),
+            'Missing original training plan; refusing unsafe resumption')
+    print('RESUMING EXISTING RUN',run_id,'FROM',selected,flush=True)
+    from toolkit.train_engine import run as engine
+    with training_lock(folder):
+        # Recheck after acquiring the exclusive lock; the original trainer may
+        # have completed between CLI preflight and this point.
+        meta=read(folder/'run.json')
+        require(meta['status'] in ('training','failed','interrupted') and
+                not (folder/'training_result.json').exists(),
+                'This run completed before resume acquired its lock')
+        meta=update_run(folder,meta,'training',{'resume_requested_utc':utc(),
+                                             'resumed_from_checkpoint':selected.name})
+        try:
+            result=engine(frozen,folder,resume_checkpoint=selected.name,lock_already_held=True)
+            meta=update_run(folder,meta,'trained',{'result':result})
+            print('TRAINED',meta['run_id'],'at',folder)
+            if meta.get('auto_evaluate'):
+                evaluate(project,version,run_id)
+            print('RUN FINISHED:',meta['run_id'])
+        except KeyboardInterrupt:
+            current=read(folder/'run.json')
+            if current['status']=='training':update_run(folder,current,'interrupted',{'error':'KeyboardInterrupt'})
+            raise
+        except Exception as exc:
+            current=read(folder/'run.json')
+            if current['status']=='training':update_run(folder,current,'failed',{'error':str(exc)})
+            raise
 
 
 def chosen_run(project,version,run_id=None):
@@ -527,7 +582,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.5')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.6')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -564,11 +619,16 @@ def main():
     ckpt=a.add_mutually_exclusive_group()
     ckpt.add_argument('--gradient-checkpointing',action='store_true')
     ckpt.add_argument('--no-gradient-checkpointing',action='store_true')
-    a.add_argument('--save-every',type=int,help='Adapter-only intermediate checkpoint interval (0 disables)')
+    a.add_argument('--save-every',type=int,help='Full resumable checkpoint interval (default 500; 0 disables)')
+    a.add_argument('--keep-last-checkpoints',type=int,help='Retain last N full checkpoints (default 3; 0 keeps all)')
     decision=a.add_mutually_exclusive_group()
     decision.add_argument('--auto-eval',action='store_true')
     decision.add_argument('--no-auto-eval',action='store_true')
     a.add_argument('--yes',action='store_true',help='Explicitly authorize the full run plan; no prompts')
+    a=sub.add_parser('resume',help='Resume an existing interrupted run using its frozen inputs and full checkpoint')
+    a.add_argument('project');a.add_argument('version')
+    a.add_argument('--run',required=True,help='Existing run ID, not a new run')
+    a.add_argument('--checkpoint',default='latest',help='latest or step_0002000')
     a=sub.add_parser('evaluate');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--base-only',action='store_true')
     a=sub.add_parser('export');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--format',choices=['hf','gguf'],default='hf')
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
@@ -594,15 +654,19 @@ def main():
             else:version_validate(a.project,a.version,need_eval=a.require_eval)
         elif a.command=='train':
             has_flags=(any(getattr(a,k) is not None for k in TRAIN_FLAG_ATTRS) or a.auto_eval or a.no_auto_eval or a.yes or
-                any(getattr(a,k,None) is not None for k in ('min_learning_rate','precision','attention_implementation','optimizer','save_every','backend','unsloth_checkpointing')) or
+                any(getattr(a,k,None) is not None for k in ('min_learning_rate','precision','attention_implementation','optimizer','save_every','keep_last_checkpoints','backend','unsloth_checkpointing')) or
                 a.gradient_checkpointing or a.no_gradient_checkpointing)
             require(not (a.guided and has_flags),'--guided cannot be combined with noninteractive training flags')
             train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))
+        elif a.command=='resume':resume(a.project,a.version,a.run,checkpoint=a.checkpoint)
         elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)
         elif a.command=='handoff':handoff(a.project)
+    except KeyboardInterrupt:
+        print('INTERRUPTED. Resume this same run with: bash workspace.sh resume PROJECT VERSION --run RUN_ID',file=sys.stderr)
+        return 130
     except (ValueError,FileNotFoundError,RuntimeError,KeyError,EOFError) as ex:
         print('ERROR:',ex,file=sys.stderr);return 1
     return 0

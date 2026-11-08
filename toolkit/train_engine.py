@@ -5,6 +5,7 @@ list. It refuses missing/extra LoRA targets rather than silently accepting a
 partially matched configuration. No implicit adapter continuation.
 """
 from __future__ import annotations
+from contextlib import nullcontext
 import json
 import math
 import random
@@ -14,6 +15,8 @@ from pathlib import Path
 from .core import read, write, utc, digest
 from .dataset import rows, expected_text
 from .backends import prepare_backend, backend_version, load_unsloth_base, attach_unsloth_lora
+from .checkpoints import (training_lock, signature, select_checkpoint,
+                          restore_checkpoint, save_checkpoint)
 
 
 def module_matches(name: str, target: str) -> bool:
@@ -88,14 +91,23 @@ def supervised_messages(row, system, index):
         raise RuntimeError(f'Assistant chat text differs from gold expected on example {index}')
     return preceding, messages
 
-def run(snapshot: Path, out: Path):
+def run(snapshot: Path, out: Path, *, resume_checkpoint=None, lock_already_held=False):
+    """Run a new training session or resume the SAME frozen run from a full checkpoint."""
+    # Import Unsloth before Torch, and fail before even opening a run directory.
+    cfg = read(snapshot/'version.json')
+    fast_model = prepare_backend(cfg['training'].get('backend','pytorch'))
+    with (nullcontext() if lock_already_held else training_lock(out)):
+        return _run(snapshot, out, resume_checkpoint=resume_checkpoint,
+                    fast_model=fast_model)
+
+
+def _run(snapshot: Path, out: Path, *, resume_checkpoint=None, fast_model=None):
     # Import Unsloth *before* torch/transformers/PEFT. Its patching relies on
     # first-import order, and failure must never fall back to another backend.
     cfg = read(snapshot/'version.json')
     tr = cfg['training']
     base = cfg['base_model']
     backend = tr.get('backend', 'pytorch')
-    fast_model = prepare_backend(backend)
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -248,10 +260,24 @@ def run(snapshot: Path, out: Path):
     else:
         optimizer = torch.optim.AdamW(optimizer_params, **opt_kw)
         effective_optimizer = 'adamw'
-    save_every = int(tr.get('save_every', 0))
+    save_every = int(tr.get('save_every', 500))
     if save_every < 0:
         raise ValueError('save_every must be >=0')
+    keep_last = int(tr.get('keep_last_checkpoints', 3))
+    if keep_last < 0:
+        raise ValueError('keep_last_checkpoints must be >=0 (0 retains all)')
+    from importlib.metadata import version as installed_version, PackageNotFoundError
+    def dependency_version(name):
+        try:return installed_version(name)
+        except PackageNotFoundError:return 'not installed'
     report = {
+        'toolkit_version':read(Path(__file__).resolve().parents[1]/'config/workspace.json')['toolkit_version'],
+        'training_engine_sha256':digest(Path(__file__)),
+        'checkpoint_engine_sha256':digest(Path(__file__).with_name('checkpoints.py')),
+        'transformers_version':dependency_version('transformers'),
+        'peft_version':dependency_version('peft'),
+        'numpy_version':dependency_version('numpy'),
+        'safetensors_version':dependency_version('safetensors'),
         'started_utc':utc(), 'base':base, 'initialization':'fresh_base',
         'loaded_model_commit_reported':loaded_revision,
         'model_commit_verification':('confirmed' if loaded_revision and loaded_revision.lower()==pinned.lower()
@@ -282,7 +308,8 @@ def run(snapshot: Path, out: Path):
         'gradient_accumulation':accum, 'effective_micro_batch':1,
         'effective_batch_size':accum,
         'seed':seed, 'max_grad_norm':float(tr['max_grad_norm']), 'log_every':int(tr['log_every']),
-        'save_every':save_every, 'intermediate_checkpoints':'adapter_only_non_resumable',
+        'save_every':save_every, 'keep_last_checkpoints':keep_last,
+        'intermediate_checkpoints':'full_optimizer_rng_resumable',
         'system_prompt_sha256':digest(snapshot/'data/system_prompt.txt'),
         'schema_sha256':digest(schema_file) if schema_file.exists() else None,
         'full_system_prompt_used_sha256': __import__('hashlib').sha256(system.encode('utf-8')).hexdigest(),
@@ -296,32 +323,64 @@ def run(snapshot: Path, out: Path):
         'trainable_fraction':round(count_trainable / count_total, 9),
         'trainable_parameter_names':sorted(name for name, _ in trainable),
     }
+    run_signature = signature(report, read(snapshot/'input_hashes.json'))
+    report['resume_signature'] = run_signature
+    plan_path = out/'training_plan.json'
+    if resume_checkpoint is not None:
+        if not plan_path.is_file() or read(plan_path).get('resume_signature') != run_signature:
+            raise RuntimeError('Cannot resume: actual trainer setup differs from saved run training plan')
+    else:
+        if plan_path.exists():
+            raise RuntimeError('Existing training plan; refusing to start a new run over it')
     print('EFFECTIVE TRAINING CONFIGURATION — VERIFIED BEFORE FIRST OPTIMIZER STEP',
           json.dumps(report,indent=2),flush=True)
-    write(out/'training_plan.json',report)
+    if resume_checkpoint is None:
+        write(plan_path,report)
     output = out/'adapter'
-    if output.exists():
-        raise RuntimeError('Adapter directory already exists; refusing to overwrite')
-    output.mkdir(parents=True)
+    if output.exists() and any(output.iterdir()):
+        raise RuntimeError('Final adapter directory is nonempty; refusing overwrite: '+str(output))
     scaler = torch.amp.GradScaler('cuda', enabled=(precision == torch.float16))
     torch.cuda.reset_peak_memory_stats()
-    t0 = time.monotonic()
     step = 0
     micro = 0
-    event = None
+    prior_elapsed = 0.0
+    if resume_checkpoint is not None:
+        restored = restore_checkpoint(
+            torch=torch, checkpoint=select_checkpoint(out,resume_checkpoint),
+            expected_signature=run_signature, optimizer=optimizer,
+            scaler=scaler,trainable=trainable,total_micro=total_micro,
+            total_steps=total_steps,accum=accum)
+        step = restored['step']
+        micro = restored['micro_step']
+        prior_elapsed = restored['elapsed_seconds']
+        event = restored['last_event']
+        print(f'RESUMED from {resume_checkpoint}: step={step}/{total_steps} '
+              f'micro={micro}/{total_micro} prior_elapsed_s={prior_elapsed:.1f}', flush=True)
+    t0 = time.monotonic()
+    if resume_checkpoint is None:
+        event = None
     optimizer.zero_grad(set_to_none=True)
-    with (out/'training_progress.jsonl').open('w',encoding='utf-8') as log:
+    progress_path = out/'training_progress.jsonl'
+    log_mode = 'a' if resume_checkpoint is not None else 'x'
+    with progress_path.open(log_mode, encoding='utf-8') as log:
+        if resume_checkpoint is not None:
+            log.write(json.dumps({'event':'resume','checkpoint':resume_checkpoint,
+                                  'step':step,'micro_step':micro,'resumed_utc':utc()})+'\n')
+            log.flush()
         for epoch in range(epochs):
             order = list(range(len(packed)))
             random.Random(seed+epoch).shuffle(order)
-            for idx in order:
+            for pos, idx in enumerate(order):
+                # This is the deterministic V8-style per-epoch order. Checkpoints
+                # are always at optimizer boundaries, so no gradients are lost.
+                if epoch * len(packed) + pos < micro:
+                    continue
                 ids, prefix_len = packed[idx]
                 x = torch.tensor([ids],dtype=torch.long,device='cuda')
                 y = x.clone()
                 y[:,:prefix_len] = -100
                 with torch.autocast(device_type='cuda', dtype=precision):
                     loss = model(input_ids=x,labels=y).loss
-                # Last partial accumulation group is scaled by its actual size.
                 group_size = min(accum, total_micro - (micro // accum)*accum)
                 scaler.scale(loss/group_size).backward()
                 micro += 1
@@ -336,35 +395,36 @@ def run(snapshot: Path, out: Path):
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
+                elapsed = prior_elapsed + time.monotonic() - t0
                 event = {'step':step,'loss':round(float(loss.detach().item()),6),
                          'learning_rate':lr,'epoch':epoch+1,
-                         'elapsed_seconds':round(time.monotonic()-t0,2)}
+                         'elapsed_seconds':round(elapsed,2)}
                 log.write(json.dumps(event)+'\n')
                 log.flush()
                 if step % int(tr['log_every']) == 0 or step == total_steps:
                     print('TRAIN',event,flush=True)
-                if save_every and step % save_every == 0 and step != total_steps:
-                    interim = out/'checkpoints'/f'step_{step:07d}'
-                    if interim.exists():
-                        raise RuntimeError('Checkpoint already exists: '+str(interim))
-                    interim.mkdir(parents=True)
-                    model.save_pretrained(interim,safe_serialization=True)
-                    tokenizer.save_pretrained(interim)
-                    write(interim/'checkpoint_info.json',{
-                        'step':step,'kind':'adapter_only_not_optimizer_resumable',
-                        'training_plan':str(out/'training_plan.json')})
+                if save_every and (step % save_every == 0 or step == total_steps):
+                    checkpoint = save_checkpoint(
+                        torch=torch,model=model,tokenizer=tokenizer,
+                        optimizer=optimizer,scaler=scaler,trainable=trainable,
+                        out=out,step=step,micro=micro,elapsed_seconds=elapsed,
+                        run_signature=run_signature,last_event=event,keep_last=keep_last)
+                    print('SAVED RESUMABLE CHECKPOINT',checkpoint,flush=True)
     if step != total_steps:
         raise RuntimeError(f'Internal optimizer-step count mismatch: {step} != {total_steps}')
+    output.mkdir(exist_ok=True)
     model.save_pretrained(output,safe_serialization=True)
     tokenizer.save_pretrained(output)
-    result = {'step':step, 'loss':event['loss'],
-              'elapsed_seconds':event['elapsed_seconds'], 'adapter':str(output),
+    elapsed = prior_elapsed + time.monotonic() - t0
+    result = {'step':step, 'loss':event['loss'] if event else None,
+              'elapsed_seconds':round(elapsed,2), 'adapter':str(output),
               'completed_utc':utc(),
               'base_resolved_revision':getattr(model.base_model.model.config,'_commit_hash',None),
               'trainable_parameter_count':count_trainable,
               'lora_matched_targets':adapters['matched_targets'], 'backend':backend,
               'train_tokens_processed':report['train_tokens_per_epoch']*epochs,
-              'training_tokens_per_second':round(report['train_tokens_per_epoch']*epochs / max(1e-9, time.monotonic()-t0), 2),
-              'peak_allocated_gpu_gib':round(torch.cuda.max_memory_allocated()/1024**3,3)}
+              'training_tokens_per_second':round(report['train_tokens_per_epoch']*epochs / max(1e-9,elapsed), 2),
+              'peak_allocated_gpu_gib':round(torch.cuda.max_memory_allocated()/1024**3,3),
+              'resumed_from':resume_checkpoint}
     write(out/'training_result.json',result)
-    return {'steps':step,'loss':event['loss'],'elapsed_seconds':event['elapsed_seconds']}
+    return {'steps':step,'loss':result['loss'],'elapsed_seconds':round(elapsed,2)}

@@ -67,7 +67,7 @@ This command starts a **new run**; it does not overwrite earlier runs or re-use 
 
 **Not guaranteed identical:** Unsloth may patch attention, tokenizers, LoRA backward kernels, or gradient-checkpointing implementations; `attn_implementation=sdpa` is forwarded, but optimized execution may differ. Its use of random state during LoRA setup can change RNG consumption. Its optimized LoRA path is fastest with `lora_dropout=0`; preserving a nonzero dropout (e.g., 0.05) can reduce acceleration. The new backend may use more memory than expected with 16-bit bases. Inspect `training_plan.json` **before trusting comparability**. Some model families or future Unsloth API changes may be incompatible and will fail rather than fall back.
 
-**Remaining common limitations:** intermediate adapter checkpoints lack optimizer/RNG state and aren't resumable; the built-in evaluation is exact JSON match, **not** task-specific semantic correctness; no benchmarked speedup is claimed. Existing evaluation and export use Transformers/PEFT and should work with a standard PEFT adapter, but **require a real GPU end-to-end smoke test** for the Unsloth output before use in production.
+**Remaining common limitations:** full optimizer/RNG checkpoints are available starting in v0.3.6, but require real hardware resumption validation; the built-in evaluation is exact JSON match, **not** task-specific semantic correctness; no benchmarked speedup is claimed. Existing evaluation and export use Transformers/PEFT and should work with a standard PEFT adapter, but **require a real GPU end-to-end smoke test** for the Unsloth output before use in production.
 
 ## Safe validation sequence
 

@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.5
+# Model Training Toolkit v0.3.6
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -147,10 +147,27 @@ rather than exact-JSON evaluation until a suitable evaluator is installed.
 See `docs/V80_TRAINING_COMPARISON.md` for a precise comparison with the ELI
 V8.0 reference trainer supplied for the audit.
 
-## Optional Unsloth backend (v0.3.5)
+## Optional Unsloth backend (v0.3.6)
 
 Training now offers `--backend pytorch` (the unchanged default) and `--backend unsloth`. The latter uses Unsloth for full-precision base loading and LoRA initialization, **without replacing MTT's masking, optimizer, scheduler, data package, or evaluation interface**. It accepts the same `--lora-target-modules` lists and refuses any missing targets or unexpected adapted layers.
 
-Install Unsloth only after stopping active training and backing up the existing pip environment; on an already GPU-enabled Windows installation, its official installation command is `python -m pip install unsloth` inside the MTT `.venv`. The optional `--unsloth-checkpointing standard|unsloth` chooses Unsloth's checkpointing strategy. See **[docs/UNSLOTH_BACKEND.md](docs/UNSLOTH_BACKEND.md)** and **[INSTALL_v0.3.5.md](INSTALL_v0.3.5.md)** for full prerequisites, a complete example command, and parity caveats.
+Install Unsloth only after stopping active training and backing up the existing pip environment; on an already GPU-enabled Windows installation, its official installation command is `python -m pip install unsloth` inside the MTT `.venv`. The optional `--unsloth-checkpointing standard|unsloth` chooses Unsloth's checkpointing strategy. See **[docs/UNSLOTH_BACKEND.md](docs/UNSLOTH_BACKEND.md)** and **[INSTALL_v0.3.6.md](INSTALL_v0.3.6.md)** for full prerequisites, a complete example command, and parity caveats.
 
 Unsloth is **not** automatically installed or selected, and the feature has not been benchmarked or GPU-smoke-tested on an RTX 5080 as part of this release.
+
+## Fully resumable training (v0.3.6)
+
+The native PyTorch and optional Unsloth training backends now write complete checkpoints (adapter, LoRA tensor state, AdamW optimizer, AMP scaler, RNG states, and exact microbatch position), defaulting to one every **500 optimizer updates**. Keep the latest three complete checkpoints by default; opt out with `--save-every 0` or retain all with `--keep-last-checkpoints 0`.
+
+```bash
+# Add to a full one-shot train command if a custom interval/retention is desired:
+--save-every 500 --keep-last-checkpoints 3
+
+# After stopping an interrupted process, resume the *original* run:
+bash workspace.sh runs --project eli
+bash projects/eli/project.sh resume v9.1 --run RUN_ID
+# For a retained older checkpoint:
+bash workspace.sh resume eli v9.1 --run RUN_ID --checkpoint step_0000500
+```
+
+The `resume` command reuses the frozen input snapshot and settings; it neither starts another run nor changes the dataset. Only checkpoints created by v0.3.6 or later are fully resumable. See [Resumable checkpoints](docs/RESUMABLE_CHECKPOINTS.md) for safety, disk-space, and verification details. Existing adapter-only checkpoints cannot resume optimizer state.
