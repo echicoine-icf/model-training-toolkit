@@ -1,5 +1,6 @@
 """Crash-safe checkpoint tests, optimizer/RNG parity, and resume CLI safety."""
 import json
+import os
 import random
 import tempfile
 import unittest
@@ -108,6 +109,31 @@ class CheckpointTorchRoundTrip(unittest.TestCase):
             with (selected/'training_state.pt').open('ab') as f:f.write(b'corruption')
             with self.assertRaisesRegex(RuntimeError,'corrupt'):
                 select_checkpoint(root)
+
+    def test_checkpoint_fsync_uses_writable_descriptors(self):
+        # Windows' _commit (used by os.fsync) rejects read-only descriptors.
+        # Simulate that restriction on Linux too, so CI catches regressions.
+        with tempfile.TemporaryDirectory() as temp:
+            model, opt, scaler = self.fresh()
+            actual_fsync = os.fsync
+            synchronized = []
+
+            def require_writable_descriptor(fd):
+                # A zero-byte write does not modify the checkpoint file, but
+                # raises EBADF when the descriptor was opened read-only.
+                os.write(fd, b'')
+                actual_fsync(fd)
+                synchronized.append(True)
+
+            with patch('toolkit.checkpoints.os.fsync', side_effect=require_writable_descriptor):
+                checkpoint = save_checkpoint(
+                    torch=torch, model=model, tokenizer=self.ToyTokenizer(),
+                    optimizer=opt, scaler=scaler,
+                    trainable=list(model.named_parameters()), out=Path(temp),
+                    step=1, micro=1, elapsed_seconds=1.0,
+                    run_signature='windows-fsync-test')
+            self.assertGreaterEqual(len(synchronized), 5)
+            self.assertEqual(select_checkpoint(Path(temp)), checkpoint)
 
     def test_retains_last_three_confirmed_snapshots(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -143,7 +143,12 @@ def save_checkpoint(*, torch, model, tokenizer, optimizer, scaler, trainable,
         # This is especially important for an unexpected power loss during save.
         for artifact in tmp.rglob('*'):
             if artifact.is_file():
-                with artifact.open('rb') as source:
+                # Windows' os.fsync uses the CRT _commit, which requires a
+                # writable file descriptor (opening 'rb' raises EBADF).
+                # These are newly created checkpoint files in our own staging
+                # directory, so opening them read/write is safe.
+                with artifact.open('r+b') as source:
+                    source.flush()
                     os.fsync(source.fileno())
         # Rename on the same filesystem is atomic. A crash before this point
         # leaves a hidden .incomplete_ directory, never a published checkpoint.

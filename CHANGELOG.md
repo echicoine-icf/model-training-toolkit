@@ -1,5 +1,7 @@
 ## v0.3.6 — Safe, complete optimizer/RNG checkpoint resume
 
+- Windows checkpoint durability hotfix: reopen saved artifacts with writable file descriptors for `os.fsync`; add cross-platform regression test.
+
 - Save fully resumable optimizer, GradScaler, exact LoRA weights, Torch/CUDA/NumPy/Python RNG, microbatch and update-step state for either backend.
 - Atomically publish verified complete checkpoints; detect corruption and incompatible frozen inputs/configuration before recovery.
 - Add `workspace.sh resume PROJECT VERSION --run RUN_ID [--checkpoint latest|step_XXXXXXX]` and generated project launcher equivalent; resume the existing run, not a new run.
