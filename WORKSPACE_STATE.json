@@ -1,0 +1,5 @@
+{
+  "status": "not_initialized",
+  "toolkit_version": "0.3.5",
+  "message": "Run bash run_me_first.sh to initialize this workspace."
+}

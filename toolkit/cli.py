@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.4'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.5'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -82,7 +82,7 @@ def version_new(project,version,*,model_id=None,revision=None):
         settings={
           'version':version,'project':project,'created_utc':utc(),'initialization':'fresh_base',
           'base_model':{'id':model_id,'revision':revision},
-          'training':{'seed':42,'epochs':1,'max_length':4096,'gradient_accumulation':1,'learning_rate':2e-5,
+          'training':{'backend':'pytorch','seed':42,'epochs':1,'max_length':4096,'gradient_accumulation':1,'learning_rate':2e-5,
              'weight_decay':0.01,'warmup_ratio':0.03,'max_grad_norm':1.0,'log_every':25,
              'lora':{'r':16,'alpha':32,'dropout':0.05,'target_modules':['q_proj','v_proj']}},
           'evaluation':{'max_new_tokens':384,'scorer':'exact_json'},
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.4','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.5','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -246,6 +246,14 @@ def explicit_training_config(args):
     save_every = 0 if save_every is None else save_every
     require(save_every >= 0,'--save-every must be >=0')
     controls['save_every'] = save_every
+    controls['backend'] = getattr(args,'backend',None) or 'pytorch'
+    require(controls['backend'] in ('pytorch','unsloth'),
+            '--backend must be pytorch or unsloth')
+    controls['unsloth_checkpointing'] = getattr(args,'unsloth_checkpointing',None) or 'standard'
+    require(controls['unsloth_checkpointing'] in ('standard','unsloth'),
+            '--unsloth-checkpointing must be standard or unsloth')
+    require(controls['backend']=='unsloth' or controls['unsloth_checkpointing']=='standard',
+            '--unsloth-checkpointing unsloth requires --backend unsloth')
     return controls,bool(args.auto_eval)
 
 
@@ -452,6 +460,11 @@ def doctor():
         print('TORCH',torch.__version__,'CUDA_AVAILABLE',torch.cuda.is_available())
         if torch.cuda.is_available():print('GPU',torch.cuda.get_device_name(0),'CUDA_RUNTIME',torch.version.cuda)
     except ImportError:print('TORCH: not installed (optional profile)')
+    from importlib import metadata, util
+    print('UNSLOTH_INSTALLED',util.find_spec('unsloth') is not None)
+    if util.find_spec('unsloth') is not None:
+        try:print('UNSLOTH_VERSION',metadata.version('unsloth'))
+        except metadata.PackageNotFoundError:print('UNSLOTH_VERSION unknown')
     print('READY' if sys.prefix!=sys.base_prefix else 'WARNING: not running from isolated venv')
 
 
@@ -514,7 +527,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.4')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.5')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -528,6 +541,9 @@ def main():
     a=sub.add_parser('train',help='Interactive wizard or explicit flag-driven training')
     a.add_argument('project');a.add_argument('version')
     a.add_argument('--guided',action='store_true',help='Interactive configuration wizard')
+    a.add_argument('--backend',choices=['pytorch','unsloth'],help='Training backend; defaults to pytorch')
+    a.add_argument('--unsloth-checkpointing',choices=['standard','unsloth'],
+                   help='Unsloth gradient-checkpointing implementation; defaults to standard')
     a.add_argument('--epochs',type=int)
     a.add_argument('--max-length',type=int)
     a.add_argument('--learning-rate',type=float)
@@ -578,7 +594,7 @@ def main():
             else:version_validate(a.project,a.version,need_eval=a.require_eval)
         elif a.command=='train':
             has_flags=(any(getattr(a,k) is not None for k in TRAIN_FLAG_ATTRS) or a.auto_eval or a.no_auto_eval or a.yes or
-                any(getattr(a,k,None) is not None for k in ('min_learning_rate','precision','attention_implementation','optimizer','save_every')) or
+                any(getattr(a,k,None) is not None for k in ('min_learning_rate','precision','attention_implementation','optimizer','save_every','backend','unsloth_checkpointing')) or
                 a.gradient_checkpointing or a.no_gradient_checkpointing)
             require(not (a.guided and has_flags),'--guided cannot be combined with noninteractive training flags')
             train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))

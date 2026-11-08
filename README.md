@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.4
+# Model Training Toolkit v0.3.5
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -146,3 +146,11 @@ rather than exact-JSON evaluation until a suitable evaluator is installed.
 
 See `docs/V80_TRAINING_COMPARISON.md` for a precise comparison with the ELI
 V8.0 reference trainer supplied for the audit.
+
+## Optional Unsloth backend (v0.3.5)
+
+Training now offers `--backend pytorch` (the unchanged default) and `--backend unsloth`. The latter uses Unsloth for full-precision base loading and LoRA initialization, **without replacing MTT's masking, optimizer, scheduler, data package, or evaluation interface**. It accepts the same `--lora-target-modules` lists and refuses any missing targets or unexpected adapted layers.
+
+Install Unsloth only after stopping active training and backing up the existing pip environment; on an already GPU-enabled Windows installation, its official installation command is `python -m pip install unsloth` inside the MTT `.venv`. The optional `--unsloth-checkpointing standard|unsloth` chooses Unsloth's checkpointing strategy. See **[docs/UNSLOTH_BACKEND.md](docs/UNSLOTH_BACKEND.md)** and **[INSTALL_v0.3.5.md](INSTALL_v0.3.5.md)** for full prerequisites, a complete example command, and parity caveats.
+
+Unsloth is **not** automatically installed or selected, and the feature has not been benchmarked or GPU-smoke-tested on an RTX 5080 as part of this release.
