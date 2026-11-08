@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.3'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.4'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.3','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.4','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -218,6 +218,34 @@ def explicit_training_config(args):
     require(0<=args.lora_dropout<1,'--lora-dropout must be in [0,1)')
     require(bool(lmods) and all(lmods) and len(set(lmods))==len(lmods),
             '--lora-target-modules must be nonempty unique comma-separated names')
+    # Optional advanced settings are validated if supplied, otherwise their
+    # defaults are explicitly captured into the run snapshot and training plan.
+    min_lr = getattr(args,'min_learning_rate',None)
+    if min_lr is not None:
+        require(0 < min_lr <= args.learning_rate,
+                '--min-learning-rate must be positive and <= --learning-rate')
+        controls['min_learning_rate'] = min_lr
+    else:
+        controls['min_learning_rate'] = args.learning_rate * 0.1
+    opts = {
+        'precision': ('auto', 'bf16', 'fp16'),
+        'attention_implementation': ('sdpa', 'eager', 'flash_attention_2'),
+        'optimizer': ('adamw', 'fused-adamw'),
+    }
+    defaults = {'precision':'auto','attention_implementation':'sdpa','optimizer':'fused-adamw'}
+    for key, allowed in opts.items():
+        value = getattr(args,key,None)
+        value = defaults[key] if value is None else value
+        require(value in allowed, f'--{key.replace("_","-")} must be one of {allowed}')
+        controls[key] = value
+    ck = getattr(args,'gradient_checkpointing',None)
+    no_ck = getattr(args,'no_gradient_checkpointing',None)
+    require(not (ck and no_ck),'Choose only one of --gradient-checkpointing and --no-gradient-checkpointing')
+    controls['gradient_checkpointing'] = False if no_ck else True
+    save_every = getattr(args,'save_every',None)
+    save_every = 0 if save_every is None else save_every
+    require(save_every >= 0,'--save-every must be >=0')
+    controls['save_every'] = save_every
     return controls,bool(args.auto_eval)
 
 
@@ -486,7 +514,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.3')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.4')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -513,6 +541,14 @@ def main():
     a.add_argument('--lora-alpha',type=int)
     a.add_argument('--lora-dropout',type=float)
     a.add_argument('--lora-target-modules')
+    a.add_argument('--min-learning-rate',type=float,help='Absolute cosine learning-rate floor')
+    a.add_argument('--precision',choices=['auto','bf16','fp16'])
+    a.add_argument('--attention-implementation',choices=['sdpa','eager','flash_attention_2'])
+    a.add_argument('--optimizer',choices=['fused-adamw','adamw'])
+    ckpt=a.add_mutually_exclusive_group()
+    ckpt.add_argument('--gradient-checkpointing',action='store_true')
+    ckpt.add_argument('--no-gradient-checkpointing',action='store_true')
+    a.add_argument('--save-every',type=int,help='Adapter-only intermediate checkpoint interval (0 disables)')
     decision=a.add_mutually_exclusive_group()
     decision.add_argument('--auto-eval',action='store_true')
     decision.add_argument('--no-auto-eval',action='store_true')
@@ -541,7 +577,9 @@ def main():
                 else:print('DATA READY',json.dumps(validate_package(folder,need_eval=a.require_eval)))
             else:version_validate(a.project,a.version,need_eval=a.require_eval)
         elif a.command=='train':
-            has_flags=any(getattr(a,k) is not None for k in TRAIN_FLAG_ATTRS) or a.auto_eval or a.no_auto_eval or a.yes
+            has_flags=(any(getattr(a,k) is not None for k in TRAIN_FLAG_ATTRS) or a.auto_eval or a.no_auto_eval or a.yes or
+                any(getattr(a,k,None) is not None for k in ('min_learning_rate','precision','attention_implementation','optimizer','save_every')) or
+                a.gradient_checkpointing or a.no_gradient_checkpointing)
             require(not (a.guided and has_flags),'--guided cannot be combined with noninteractive training flags')
             train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))
         elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only)
