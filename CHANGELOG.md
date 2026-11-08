@@ -1,3 +1,13 @@
+## v0.3.6 — Safe, complete optimizer/RNG checkpoint resume
+
+- Save fully resumable optimizer, GradScaler, exact LoRA weights, Torch/CUDA/NumPy/Python RNG, microbatch and update-step state for either backend.
+- Atomically publish verified complete checkpoints; detect corruption and incompatible frozen inputs/configuration before recovery.
+- Add `workspace.sh resume PROJECT VERSION --run RUN_ID [--checkpoint latest|step_XXXXXXX]` and generated project launcher equivalent; resume the existing run, not a new run.
+- Default to a checkpoint every 500 optimizer steps and retaining the latest three. Support `--keep-last-checkpoints 0` for unlimited history and `--save-every 0` to disable.
+- Add OS-managed concurrent training lock, loss-log resume marker, runtime accounting across attempts, and interruption status.
+- Preserve data packages and existing runs. Pre-v0.3.6 adapter-only checkpoints remain non-resumable.
+- Include CPU optimizer/RNG interruption parity tests; GPU/Unsloth end-to-end recovery remains to be verified.
+
 ## v0.3.5 — Optional Unsloth training backend
 
 - Add `--backend pytorch|unsloth` to CLI and training wizard; default remains the existing PyTorch implementation.

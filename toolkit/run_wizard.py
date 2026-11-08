@@ -69,7 +69,10 @@ def wizard(config, *,previous=None):
     c['attention_implementation']=entry('Attention implementation (sdpa/eager/flash_attention_2)',current.get('attention_implementation','sdpa'),str,'Enter supported attention backend',check=lambda v:v in ('sdpa','eager','flash_attention_2'))
     c['optimizer']=entry('Optimizer (fused-adamw/adamw)',current.get('optimizer','fused-adamw'),str,'Enter fused-adamw or adamw',check=lambda v:v in ('fused-adamw','adamw'))
     c['gradient_checkpointing']=yesno('Use gradient checkpointing?',current.get('gradient_checkpointing',True))
-    c['save_every']=entry('Save adapter checkpoint every N steps (0=final only)',current.get('save_every',0),int,'Enter >=0',check=lambda v:v>=0)
+    c['save_every']=entry('Save FULL resumable checkpoint every N optimizer steps (0=disabled)',current.get('save_every',500),int,'Enter >=0',check=lambda v:v>=0)
+    c['keep_last_checkpoints']=entry('Retain last N complete checkpoints (0=all)',current.get('keep_last_checkpoints',3),int,'Enter >=0',check=lambda v:v>=0)
+    if not c['save_every']:
+        print('WARNING: checkpoint saving is disabled; an interruption will require a complete new run.')
     if c['backend']=='unsloth':
         c['unsloth_checkpointing']=entry('Unsloth checkpoint implementation (standard/unsloth)',
             current.get('unsloth_checkpointing','standard'),str,
