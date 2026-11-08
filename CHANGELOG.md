@@ -1,3 +1,10 @@
+## 0.3.3
+
+- Training supports noninteractive, explicit CLI flags for every hyperparameter and auto-eval policy; `--yes` required.
+- Invalid or missing flags fail before any training run is created.
+- Guided wizard remains available.
+- Project-local launcher forwards train arguments (refreshed by `workspace.sh upgrade`).
+
 # Changelog
 
 ## v0.3.2 — GPU-aware PyTorch installation

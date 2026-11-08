@@ -12,7 +12,7 @@ from toolkit.run_wizard import wizard as training_wizard
 from toolkit.data_package import initialize, inspect, validate_package, assistant_wizard, migrate_legacy
 
 
-PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" train "$NAME" "$1" --guided ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|evaluate VERSION [--run ID]|status|handoff}\' ;;\nesac\n'
+PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|evaluate VERSION [--run ID]|status|handoff}\' ;;\nesac\n'
 
 def scaffold_project_launcher(dest):
     dest=Path(dest)
@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.1'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.3'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.1','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.3','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -184,16 +184,54 @@ def update_run(folder,meta,status,other=None):
     return meta
 
 
-def train(project,version,*,guided=True):
-    """No silent training: all hyperparameters and auto-eval require explicit review."""
+# Deliberately require all values in automated runs. A forgotten flag must never
+# silently fall back to a prior version's hyperparameter or evaluation policy.
+TRAIN_FLAG_ATTRS = ('epochs','max_length','learning_rate','gradient_accumulation',
+                    'seed','weight_decay','warmup_ratio','max_grad_norm','log_every',
+                    'lora_r','lora_alpha','lora_dropout','lora_target_modules')
+
+
+def explicit_training_config(args):
+    require(args is not None,'Missing CLI training arguments')
+    missing=[f'--{k.replace("_","-")}' for k in TRAIN_FLAG_ATTRS if getattr(args,k,None) is None]
+    if getattr(args,'auto_eval',False) == getattr(args,'no_auto_eval',False):
+        missing.append('exactly one of --auto-eval / --no-auto-eval')
+    if not getattr(args,'yes',False):missing.append('--yes (explicitly authorize training)')
+    require(not missing,'Noninteractive training requires: '+', '.join(missing))
+    lmods=[x.strip() for x in args.lora_target_modules.split(',')]
+    controls={'epochs':args.epochs,'max_length':args.max_length,'learning_rate':args.learning_rate,
+        'gradient_accumulation':args.gradient_accumulation,'seed':args.seed,
+        'weight_decay':args.weight_decay,'warmup_ratio':args.warmup_ratio,
+        'max_grad_norm':args.max_grad_norm,'log_every':args.log_every,
+        'lora':{'r':args.lora_r,'alpha':args.lora_alpha,
+                'dropout':args.lora_dropout,'target_modules':lmods}}
+    require(args.epochs>=1,'--epochs must be >= 1')
+    require(args.max_length>=128,'--max-length must be >= 128')
+    require(0<args.learning_rate<1,'--learning-rate must be between 0 and 1 (exclusive)')
+    require(args.gradient_accumulation>=1,'--gradient-accumulation must be >= 1')
+    require(args.seed>=0,'--seed must be >= 0')
+    require(0<=args.weight_decay<1,'--weight-decay must be in [0,1)')
+    require(0<=args.warmup_ratio<1,'--warmup-ratio must be in [0,1)')
+    require(args.max_grad_norm>0,'--max-grad-norm must be > 0')
+    require(args.log_every>=1,'--log-every must be >= 1')
+    require(args.lora_r>=1 and args.lora_alpha>=1,'--lora-r and --lora-alpha must be >= 1')
+    require(0<=args.lora_dropout<1,'--lora-dropout must be in [0,1)')
+    require(bool(lmods) and all(lmods) and len(set(lmods))==len(lmods),
+            '--lora-target-modules must be nonempty unique comma-separated names')
+    return controls,bool(args.auto_eval)
+
+
+def train(project,version,*,guided=True,train_args=None):
+    """Train with either guided review or fully explicit, recorded CLI arguments."""
+    if not guided:
+        explicit_training_config(train_args)  # fail fast before reading data or creating a run
     v=version_path(project,version)
     config=read(v/'version.json')
-    if not guided:raise RuntimeError('Training requires interactive per-run parameter review. Use project.sh train VERSION.')
     print('\nCHECKING VERSION DATA PACKAGE',v/'data')
     package_status=inspect(v)
     if package_status['missing']:
         print('Version inputs missing:',', '.join(package_status['missing']))
-        if not sys.stdin.isatty():raise RuntimeError('Noninteractive training cannot import missing inputs. Run data wizard.')
+        if not guided or not sys.stdin.isatty():raise RuntimeError('Training inputs missing; supply the version data package before noninteractive training. Run data wizard manually if needed.')
         if not assistant_wizard(v):
             print('CANCELED: supply missing files, then rerun training');return
     version_validate(project,version)
@@ -206,15 +244,24 @@ def train(project,version,*,guided=True):
             if rec.get('reviewed_training') and rec.get('training_overrides'):
                 prior=rec['training_overrides']
                 break
-    print(f'\nTRAINING WIZARD {project}/{version}')
-    selected=training_wizard(config,previous=prior)
-    if selected is None:return
-    controls,auto_eval,base_override=selected
+    if guided:
+        print(f'\nTRAINING WIZARD {project}/{version}')
+        selected=training_wizard(config,previous=prior)
+        if selected is None:return
+        controls,auto_eval,base_override=selected
+    else:
+        controls,auto_eval=explicit_training_config(train_args)
+        base_override=config.get('base_model')
+        require(bool(base_override and base_override.get('id') and base_override.get('revision')),
+                'Base model must be selected at version creation')
+        print('NONINTERACTIVE TRAINING PLAN',json.dumps({
+          'project':project,'version':version,'base_model':base_override,
+          'initialization':'fresh_base','training':controls,'auto_evaluate':auto_eval},indent=2))
     if auto_eval:
         try:version_validate(project,version,need_eval=True)
         except ValueError as exc:
             print('AUTO-EVALUATION INPUTS REQUIRED:',exc)
-            if sys.stdin.isatty() and assistant_wizard(v,need_eval=True):
+            if guided and sys.stdin.isatty() and assistant_wizard(v,need_eval=True):
                 version_validate(project,version,need_eval=True)
             else:
                 print('CANCELED: no training started because automatic evaluation lacks its dataset')
@@ -439,7 +486,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.1')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.3')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -450,7 +497,26 @@ def main():
     a=sub.add_parser('version');a.add_argument('action',choices=['create','wizard','list']);a.add_argument('project');a.add_argument('version',nargs='?');a.add_argument('--model');a.add_argument('--revision')
     a=sub.add_parser('dataset');a.add_argument('action',choices=['validate']);a.add_argument('project');a.add_argument('version')
     a=sub.add_parser('data');a.add_argument('action',choices=['inspect','wizard','validate']);a.add_argument('project');a.add_argument('version');a.add_argument('--require-eval',action='store_true')
-    a=sub.add_parser('train');a.add_argument('project');a.add_argument('version');a.add_argument('--guided',action='store_true',help='Interactive review (always required)')
+    a=sub.add_parser('train',help='Interactive wizard or explicit flag-driven training')
+    a.add_argument('project');a.add_argument('version')
+    a.add_argument('--guided',action='store_true',help='Interactive configuration wizard')
+    a.add_argument('--epochs',type=int)
+    a.add_argument('--max-length',type=int)
+    a.add_argument('--learning-rate',type=float)
+    a.add_argument('--gradient-accumulation',type=int)
+    a.add_argument('--seed',type=int)
+    a.add_argument('--weight-decay',type=float)
+    a.add_argument('--warmup-ratio',type=float)
+    a.add_argument('--max-grad-norm',type=float)
+    a.add_argument('--log-every',type=int)
+    a.add_argument('--lora-r',type=int)
+    a.add_argument('--lora-alpha',type=int)
+    a.add_argument('--lora-dropout',type=float)
+    a.add_argument('--lora-target-modules')
+    decision=a.add_mutually_exclusive_group()
+    decision.add_argument('--auto-eval',action='store_true')
+    decision.add_argument('--no-auto-eval',action='store_true')
+    a.add_argument('--yes',action='store_true',help='Explicitly authorize the full run plan; no prompts')
     a=sub.add_parser('evaluate');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--base-only',action='store_true')
     a=sub.add_parser('export');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--format',choices=['hf','gguf'],default='hf')
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
@@ -474,7 +540,10 @@ def main():
                 if not assistant_wizard(folder,need_eval=a.require_eval):print('Data wizard ended without all inputs')
                 else:print('DATA READY',json.dumps(validate_package(folder,need_eval=a.require_eval)))
             else:version_validate(a.project,a.version,need_eval=a.require_eval)
-        elif a.command=='train':train(a.project,a.version,guided=True)
+        elif a.command=='train':
+            has_flags=any(getattr(a,k) is not None for k in TRAIN_FLAG_ATTRS) or a.auto_eval or a.no_auto_eval or a.yes
+            require(not (a.guided and has_flags),'--guided cannot be combined with noninteractive training flags')
+            train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))
         elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)

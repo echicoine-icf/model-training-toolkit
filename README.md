@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.2
+# Model Training Toolkit v0.3.3
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -20,7 +20,7 @@ bash run_me_first.sh --install-ml
 bash workspace.sh doctor
 ```
 
-To upgrade an existing v0.3.0 workspace, copy distribution files from the full archive **without overwriting** `WORKSPACE_STATE.json`, `.venv`, `projects/`, `runs/`, `tools/llama.cpp`, or registry data. See [INSTALL_v0.3.2.md](INSTALL_v0.3.2.md) for exact safe commands. Then:
+To upgrade an existing workspace, copy distribution files from the full archive **without overwriting** `WORKSPACE_STATE.json`, `.venv`, `projects/`, `runs/`, `tools/llama.cpp`, or registry data. See [INSTALL_v0.3.3.md](INSTALL_v0.3.3.md) for the Git-based source-to-operational update workflow. Then:
 
 ```bash
 bash workspace.sh upgrade
@@ -102,3 +102,22 @@ The model suitability list is conservative guidance, **not** a guarantee the GPU
 ## GPU-aware PyTorch setup (v0.3.2)
 
 `bash run_me_first.sh --install-ml` chooses the CUDA 12.8 PyTorch 2.10.0 build when an NVIDIA GPU is detected, checks a real CUDA tensor operation, and aborts on CUDA failure. The existing Python `.venv` remains isolated. An already verified `2.10.0+cu128` wheel is preserved. See `INSTALL_v0.3.2.md` for the non-destructive upgrade.
+
+## Single-command training (v0.3.3)
+
+The guided wizard still works: `bash projects/eli/project.sh train v9.0`.
+For automation or an ELI development chat, provide **every** run parameter explicitly:
+
+```bash
+bash workspace.sh train eli v9.0 \
+  --epochs 1 --max-length 4096 --learning-rate 2e-5 \
+  --gradient-accumulation 1 --seed 42 --weight-decay 0.01 \
+  --warmup-ratio 0.03 --max-grad-norm 1.0 --log-every 25 \
+  --lora-r 16 --lora-alpha 32 --lora-dropout 0.05 \
+  --lora-target-modules q_proj,v_proj \
+  --no-auto-eval --yes
+```
+
+Switch `--no-auto-eval` to `--auto-eval` to require an evaluation dataset and automatically run evaluation after successful training. The command fails before creating a run if any flag is missing, conflicting, or invalid. **These values are examples, not ELI-specific recommendations.** The fixed model remains defined at version creation. A fully parameterized run is recorded in a frozen run snapshot. `--yes` explicitly authorizes execution without prompts.
+
+The project-local entrypoint also accepts flags after the version: `bash projects/eli/project.sh train v9.0 [FLAGS...]`. Existing project launchers are refreshed by `bash workspace.sh upgrade`.
