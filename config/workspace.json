@@ -1,0 +1,11 @@
+{
+  "name": "Model Training Toolkit",
+  "toolkit_version": "0.3.2",
+  "llama_cpp": {
+    "repository": "https://github.com/ggml-org/llama.cpp.git",
+    "ref": "v0.9.0",
+    "build_on_setup": false
+  },
+  "model_cache": "cache/huggingface",
+  "default_seed": 42
+}

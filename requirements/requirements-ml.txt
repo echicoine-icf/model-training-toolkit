@@ -1,0 +1,8 @@
+# ML training dependencies (installed exclusively inside .venv).
+# PyTorch is managed by scripts/bootstrap.py first, using detected CPU/CUDA profile.
+# Do not add unqualified torch here: it can silently install CPU wheels on Windows.
+transformers>=4.45,<5
+peft>=0.13,<1
+accelerate>=1.0,<2
+safetensors>=0.4,<1
+huggingface-hub>=0.26,<2

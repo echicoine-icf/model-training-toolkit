@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+WORKSPACE_STATE.json
+tools/llama.cpp/
+projects/
+runs/
+cache/
+logs/
+exports/
+*.safetensors
+*.gguf
+.env
