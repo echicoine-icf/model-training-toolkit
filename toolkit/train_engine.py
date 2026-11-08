@@ -13,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 from .core import read, write, utc, digest
 from .dataset import rows, expected_text
+from .backends import prepare_backend, backend_version, load_unsloth_base, attach_unsloth_lora
 
 
 def module_matches(name: str, target: str) -> bool:
@@ -88,6 +89,13 @@ def supervised_messages(row, system, index):
     return preceding, messages
 
 def run(snapshot: Path, out: Path):
+    # Import Unsloth *before* torch/transformers/PEFT. Its patching relies on
+    # first-import order, and failure must never fall back to another backend.
+    cfg = read(snapshot/'version.json')
+    tr = cfg['training']
+    base = cfg['base_model']
+    backend = tr.get('backend', 'pytorch')
+    fast_model = prepare_backend(backend)
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -95,9 +103,6 @@ def run(snapshot: Path, out: Path):
         from peft.tuners.lora import LoraLayer
     except ImportError as exc:
         raise RuntimeError('ML dependencies missing. Run bash run_me_first.sh --install-ml') from exc
-    cfg = read(snapshot/'version.json')
-    tr = cfg['training']
-    base = cfg['base_model']
     if cfg.get('initialization', 'fresh_base') != 'fresh_base':
         raise ValueError('Only fresh_base training is supported')
     if not torch.cuda.is_available():
@@ -120,12 +125,39 @@ def run(snapshot: Path, out: Path):
     train = rows(snapshot/'data/train.jsonl')
     if not train:
         raise RuntimeError('Empty training dataset')
-    tokenizer = AutoTokenizer.from_pretrained(base['id'], revision=base.get('revision') or 'main', trust_remote_code=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
     max_len = int(tr['max_length'])
     if max_len < 128:
         raise ValueError('max_length must be >= 128')
+    precision_setting = tr.get('precision', 'auto')
+    if precision_setting not in ('auto', 'bf16', 'fp16'):
+        raise ValueError('precision must be auto, bf16, or fp16')
+    if precision_setting == 'bf16' and not torch.cuda.is_bf16_supported():
+        raise RuntimeError('BF16 requested but not supported on GPU')
+    precision = (torch.bfloat16 if precision_setting == 'bf16' or
+                 (precision_setting == 'auto' and torch.cuda.is_bf16_supported())
+                 else torch.float16)
+    attention = tr.get('attention_implementation', 'sdpa')
+    if attention not in ('sdpa', 'eager', 'flash_attention_2'):
+        raise ValueError('Unsupported attention_implementation')
+    checkpointing = bool(tr.get('gradient_checkpointing', True))
+    checkpointing_mode = tr.get('unsloth_checkpointing', 'standard')
+    if checkpointing_mode not in ('standard', 'unsloth'):
+        raise ValueError('unsloth_checkpointing must be standard or unsloth')
+    if backend != 'unsloth' and checkpointing_mode != 'standard':
+        raise ValueError('unsloth_checkpointing=unsloth requires backend=unsloth')
+
+    if backend == 'unsloth':
+        # Load the model and tokenizer together: Unsloth may patch tokenizers,
+        # so tokenization MUST use the tokenizer from the effective backend.
+        model, tokenizer = load_unsloth_base(
+            fast_model, base=base, max_length=max_len,
+            precision=precision, attention=attention)
+    else:
+        model = None
+        tokenizer = AutoTokenizer.from_pretrained(
+            base['id'], revision=base.get('revision') or 'main', trust_remote_code=False)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     packed = []
     excluded = []
     lengths = []
@@ -149,18 +181,18 @@ def run(snapshot: Path, out: Path):
     total_micro = len(packed) * epochs
     total_steps = math.ceil(total_micro / accum)
     at_lr, warmup, min_lr = optimizer_schedule(tr, total_steps)
-    precision_setting = tr.get('precision', 'auto')
-    if precision_setting not in ('auto', 'bf16', 'fp16'):
-        raise ValueError('precision must be auto, bf16, or fp16')
-    if precision_setting == 'bf16' and not torch.cuda.is_bf16_supported():
-        raise RuntimeError('BF16 requested but not supported on GPU')
-    precision = torch.bfloat16 if precision_setting == 'bf16' or (precision_setting == 'auto' and torch.cuda.is_bf16_supported()) else torch.float16
-    attention = tr.get('attention_implementation', 'sdpa')
-    if attention not in ('sdpa', 'eager', 'flash_attention_2'):
-        raise ValueError('Unsupported attention_implementation')
-    model = AutoModelForCausalLM.from_pretrained(base['id'], revision=base.get('revision') or 'main',
-                                                 torch_dtype=precision, attn_implementation=attention,
-                                                 trust_remote_code=False).to('cuda')
+
+    if backend == 'pytorch':
+        model = AutoModelForCausalLM.from_pretrained(
+            base['id'], revision=base.get('revision') or 'main',
+            torch_dtype=precision, attn_implementation=attention,
+            trust_remote_code=False).to('cuda')
+    loaded_revision = getattr(model.config, '_commit_hash', None)
+    pinned = base.get('revision') or ''
+    if len(pinned) == 40 and all(c in '0123456789abcdefABCDEF' for c in pinned):
+        if loaded_revision and loaded_revision.lower() != pinned.lower():
+            raise RuntimeError('Loaded model commit differs from frozen base revision: '
+                               f'{loaded_revision} != {pinned}; refusing to train')
     model.config.use_cache = False
     lora = tr['lora']
     targets = list(lora['target_modules'])
@@ -172,22 +204,31 @@ def run(snapshot: Path, out: Path):
     if any(not paths for paths in eligible.values()):
         raise RuntimeError('Requested LoRA target(s) absent in base model: '+
                            repr([k for k,v in eligible.items() if not v]))
-    model = get_peft_model(model, LoraConfig(task_type=TaskType.CAUSAL_LM,
-                           r=int(lora['r']), lora_alpha=int(lora['alpha']),
-                           lora_dropout=float(lora['dropout']), bias='none',
-                           init_lora_weights=True, target_modules=targets))
+    if backend == 'unsloth':
+        model = attach_unsloth_lora(
+            fast_model, model, lora=lora, seed=seed, max_length=max_len,
+            gradient_checkpointing=checkpointing,
+            checkpointing_mode=checkpointing_mode)
+    else:
+        model = get_peft_model(model, LoraConfig(task_type=TaskType.CAUSAL_LM,
+                               r=int(lora['r']), lora_alpha=int(lora['alpha']),
+                               lora_dropout=float(lora['dropout']), bias='none',
+                               init_lora_weights=True, target_modules=targets))
     adapters = verify_lora_modules(model, targets, LoraLayer)
     if any(adapters['matched_targets'][key]!=len(value) for key,value in eligible.items()):
         raise RuntimeError('PEFT adapted fewer/more base layers than requested: '+
                            repr({key:{'eligible':len(value),'adapted':adapters['matched_targets'][key]}
                                  for key,value in eligible.items()}))
-    checkpointing = bool(tr.get('gradient_checkpointing', True))
-    if checkpointing:
+    if backend == 'pytorch' and checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+    if backend == 'unsloth' and hasattr(fast_model, 'for_training'):
+        fast_model.for_training(model)
     model.train()
     trainable = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     if not trainable:
         raise RuntimeError('No trainable adapter parameters')
+    if backend == 'unsloth' and not all(p.device.type == 'cuda' for _,p in trainable):
+        raise RuntimeError('Unsloth returned LoRA parameters outside CUDA; refusing CPU training')
     if any('lora_' not in name for name, _ in trainable):
         raise RuntimeError('Found trainable non-LoRA weights; refusing unexpected base-model updates')
     count_trainable = sum(p.numel() for _, p in trainable)
@@ -212,18 +253,31 @@ def run(snapshot: Path, out: Path):
         raise ValueError('save_every must be >=0')
     report = {
         'started_utc':utc(), 'base':base, 'initialization':'fresh_base',
+        'loaded_model_commit_reported':loaded_revision,
+        'model_commit_verification':('confirmed' if loaded_revision and loaded_revision.lower()==pinned.lower()
+                                     else 'backend_did_not_expose_commit'),
+        'backend':backend, 'backend_version':backend_version(backend),
+        'quantization':'none (16-bit base)',
+        'sequence_packing':False,
+        'backend_attention_note':('Unsloth may substitute optimized attention kernels; '
+                                  'requested attention is not guaranteed numerically identical'
+                                  if backend == 'unsloth' else 'Transformers attention selection'),
         'device':torch.cuda.get_device_name(0), 'cuda_runtime':torch.version.cuda,
         'torch_version':torch.__version__,
         'precision_requested':precision_setting, 'precision_effective':str(precision).replace('torch.',''),
         'attention_requested':attention,
         'attention_effective':getattr(model.config, '_attn_implementation',None),
         'gradient_checkpointing':checkpointing,
+        'checkpointing_mode': (checkpointing_mode if backend == 'unsloth' else 'pytorch_non_reentrant'),
         'optimizer_requested':optimizer_choice, 'optimizer_effective':effective_optimizer,
         'optimizer_weight_decay':float(tr['weight_decay']),
         'scheduler':'cosine_absolute_minimum', 'peak_lr':float(tr['learning_rate']),
         'min_lr':min_lr, 'warmup_ratio':float(tr['warmup_ratio']),
         'warmup_steps':warmup, 'total_optimizer_steps':total_steps,
         'training_examples':len(packed), 'epochs':epochs,
+        'train_tokens_per_epoch':sum(len(ids) for ids,_ in packed),
+        'assistant_target_tokens_per_epoch':sum(len(ids)-prefix_len for ids,prefix_len in packed),
+        'loss_masking':'assistant_only_prefix_labels_minus_100',
         'max_length':max_len, 'max_observed_tokens':max(lengths),
         'gradient_accumulation':accum, 'effective_micro_batch':1,
         'effective_batch_size':accum,
@@ -235,7 +289,8 @@ def run(snapshot: Path, out: Path):
         'tokenizer_class':tokenizer.__class__.__name__,
         'tokenizer_chat_template_sha256':__import__('hashlib').sha256(str(tokenizer.chat_template).encode('utf-8')).hexdigest(),
         'lora_rank':int(lora['r']), 'lora_alpha':int(lora['alpha']),
-        'lora_initialization':'peft_default_A_kaiming_B_zero',
+        'lora_initialization':('unsloth_get_peft_model_default' if backend == 'unsloth'
+                               else 'peft_default_A_kaiming_B_zero'),
         'lora_dropout':float(lora['dropout']), 'lora':adapters,
         'trainable_parameter_count':count_trainable, 'total_parameter_count':count_total,
         'trainable_fraction':round(count_trainable / count_total, 9),
@@ -249,6 +304,7 @@ def run(snapshot: Path, out: Path):
         raise RuntimeError('Adapter directory already exists; refusing to overwrite')
     output.mkdir(parents=True)
     scaler = torch.amp.GradScaler('cuda', enabled=(precision == torch.float16))
+    torch.cuda.reset_peak_memory_stats()
     t0 = time.monotonic()
     step = 0
     micro = 0
@@ -306,6 +362,9 @@ def run(snapshot: Path, out: Path):
               'completed_utc':utc(),
               'base_resolved_revision':getattr(model.base_model.model.config,'_commit_hash',None),
               'trainable_parameter_count':count_trainable,
-              'lora_matched_targets':adapters['matched_targets']}
+              'lora_matched_targets':adapters['matched_targets'], 'backend':backend,
+              'train_tokens_processed':report['train_tokens_per_epoch']*epochs,
+              'training_tokens_per_second':round(report['train_tokens_per_epoch']*epochs / max(1e-9, time.monotonic()-t0), 2),
+              'peak_allocated_gpu_gib':round(torch.cuda.max_memory_allocated()/1024**3,3)}
     write(out/'training_result.json',result)
     return {'steps':step,'loss':event['loss'],'elapsed_seconds':event['elapsed_seconds']}

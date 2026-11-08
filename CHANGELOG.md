@@ -1,3 +1,13 @@
+## v0.3.5 — Optional Unsloth training backend
+
+- Add `--backend pytorch|unsloth` to CLI and training wizard; default remains the existing PyTorch implementation.
+- Import Unsloth before torch; initialize unquantized base and PEFT LoRA through Unsloth when explicitly requested.
+- Preserve the common supervised masking, dataset validation, optimizer/schedule, accumulation, snapshots, evaluation interface, and output contract.
+- Preserve arbitrary target modules and audit all actual PEFT LoRA layers before optimization; abort on incomplete or unexpected matches.
+- Add `--unsloth-checkpointing standard|unsloth` (Unsloth-only) and record backend version and computation caveats in the training plan.
+- Document safe optional installation, Windows/CUDA considerations, and smoke-test requirements. No automatic dependency upgrades or existing-run changes.
+- Add backend-selection and Unsloth API passthrough tests. Native GPU verification is pending.
+
 ## v0.3.4 — LoRA architecture verification and training reproducibility
 
 - Honor arbitrary CLI LoRA target-module lists; verify exact PEFT matched-layer coverage before optimization.

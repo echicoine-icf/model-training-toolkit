@@ -45,6 +45,8 @@ def wizard(config, *,previous=None):
     for gpu in machine['gpus']:print('GPU:',gpu['name'],'VRAM:',gpu['vram_gb'],'GiB')
     print('Disk free:',machine['disk_free_gb'],'GiB')
     c={}
+    c['backend']=entry('Training backend (pytorch/unsloth)',current.get('backend','pytorch'),str,
+                       'Enter pytorch or unsloth',check=lambda v:v in ('pytorch','unsloth'))
     c['epochs']=entry('Epochs',current['epochs'],int,'Enter a positive integer',check=lambda v:v>=1)
     c['max_length']=entry('Maximum sequence tokens (prompt + target)',current['max_length'],int,'Enter integer >= 128',check=lambda v:v>=128)
     c['learning_rate']=entry('Learning rate',current['learning_rate'],float,'Enter learning rate greater than 0 and less than 1',check=lambda v:0<v<1)
@@ -68,6 +70,12 @@ def wizard(config, *,previous=None):
     c['optimizer']=entry('Optimizer (fused-adamw/adamw)',current.get('optimizer','fused-adamw'),str,'Enter fused-adamw or adamw',check=lambda v:v in ('fused-adamw','adamw'))
     c['gradient_checkpointing']=yesno('Use gradient checkpointing?',current.get('gradient_checkpointing',True))
     c['save_every']=entry('Save adapter checkpoint every N steps (0=final only)',current.get('save_every',0),int,'Enter >=0',check=lambda v:v>=0)
+    if c['backend']=='unsloth':
+        c['unsloth_checkpointing']=entry('Unsloth checkpoint implementation (standard/unsloth)',
+            current.get('unsloth_checkpointing','standard'),str,
+            'Enter standard or unsloth',check=lambda v:v in ('standard','unsloth'))
+    else:
+        c['unsloth_checkpointing']='standard'
     auto=yesno('Evaluate automatically after successful training?','auto_evaluate_default' in config.get('workflow',{}) and config['workflow']['auto_evaluate_default'])
     print('\nFINAL RUN PLAN (recorded in the run manifest)')
     import json

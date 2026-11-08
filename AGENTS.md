@@ -1,9 +1,9 @@
 # Model Training Toolkit — Agent Operating Guide
 
-**Applies to:** Model Training Toolkit v0.3.3 (the code in this repository).  
+**Applies to:** Model Training Toolkit v0.3.5 (the code in this repository).  
 **Purpose:** Give a coding agent enough verified context to install a workspace, register projects and model versions, create version-specific training/evaluation packages, execute runs, and hand work to another agent **without inventing version-specific training scripts**.
 
-> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents v0.3.3, not hypothetical future capabilities. If the installed toolkit version differs, inspect its implementation first.
+> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents v0.3.5, not hypothetical future capabilities. If the installed toolkit version differs, inspect its implementation first.
 
 ## 1. Architecture and ownership
 
@@ -49,9 +49,11 @@ The established workflow uses two separate checkouts:
 cd ~/model-training-toolkit-repo
 python -m unittest discover -s tests -v
 git status --short
+git switch -c feat/describe-change
 git add <explicit-source-paths>
 git commit -m "Describe change"
-git push origin main
+git push -u origin feat/describe-change
+# Open a pull request and merge through the protected main branch
 
 # In operational checkout:
 cd ~/model-training-toolkit
@@ -226,3 +228,7 @@ Read these in order:
 5. `projects/<project>/versions/<version>/version.json` and `data/package.json`, then relevant `runs/.../run.json` and evaluation summaries.
 
 **Initial agent response in a new chat:** State the detected toolkit version, project/version, selected base model, current dataset readiness, last completed run and evaluation status, and the *single next executable action*. If any of those facts are unavailable, say so rather than guessing.
+
+## Optional Unsloth training backend (v0.3.5)
+
+Read `docs/UNSLOTH_BACKEND.md` before enabling Unsloth. The default `--backend pytorch` never imports it. With `--backend unsloth`, MTT uses Unsloth for fresh-base full-precision model loading and PEFT initialization but retains the shared loss masking, optimizer, LR schedule, and output contract. Do not claim GPU compatibility, parity, or speedup until tested on the target installation. Import Unsloth **before** Torch/Transformers/PEFT when selected; never silently fall back to PyTorch. Do not change a frozen project's data package just to enable a backend. A new run may use the same immutable inputs.
