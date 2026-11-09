@@ -1,3 +1,15 @@
+## v0.4.0 — Safe workspace diagnostics and metadata repair
+
+- `workspace.sh doctor` is read-only: diagnose missing, stale, invalid, and inconsistent
+  `WORKSPACE_STATE.json` without pretending a broken environment is ready.
+- `workspace.sh doctor --repair` repairs **only** machine-local state metadata after
+  verifying venv/interpreter and workspace layout; existing files are backed up first.
+- `workspace.sh upgrade` refreshes `ready`, code version and upgrade timestamp only
+  after successful workspace upgrades, and recovers missing state on valid workspaces.
+- Git-ignore local state and backups; warn when the state file is still tracked.
+- Add 14 stdlib-only regression tests; preserve all training, shared benchmark,
+  datasets, checkpoint, Ollama and evaluation behaviors.
+
 ## v0.3.9 — Targeted shared evaluation selection
 
 - `shared-eval --suite NAME` can select one, repeated, or comma-separated named suites, independent of cumulative `--stage` selection.
