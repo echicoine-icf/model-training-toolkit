@@ -1,9 +1,9 @@
 # Model Training Toolkit — Agent Operating Guide
 
-**Applies to:** Model Training Toolkit v0.3.6 (the code in this repository).  
+**Applies to:** Model Training Toolkit v0.4.0 (the code in this repository).  
 **Purpose:** Give a coding agent enough verified context to install a workspace, register projects and model versions, create version-specific training/evaluation packages, execute runs, and hand work to another agent **without inventing version-specific training scripts**.
 
-> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents v0.3.6, not hypothetical future capabilities. If the installed toolkit version differs, inspect its implementation first.
+> **Source of truth:** Inspect the checked-out code and `docs/DATA_PACKAGE_CONTRACT.md` before changing anything. This file documents the current checked-out toolkit, not hypothetical capabilities. If the installed toolkit version differs, inspect its implementation first.
 
 ## 1. Architecture and ownership
 
@@ -263,3 +263,17 @@ The V9.2 24,501-row training-baseline result belongs only to the V9.2 run.
 ## Targeted shared evaluation (v0.3.9)
 
 `shared-eval` supports `--list-suites`, repeated or comma-separated `--suite` selections, and unchanged cumulative `--stage`. Never combine `--suite` and `--stage`. In ELI `benchmark-v1.0.2`, targeted 513/26/16/160 are checked exact subsets of immutable frozen_715; they are non-additive development reports, not independent accuracy denominators. The full 715 and focused gold remain release-gate authority. Every report includes package version and dataset hash; no frozen scorer modifications. Existing v1.0.1 runs and V9.2 training baseline stay intact.
+
+## Workspace state recovery (v0.4.0)
+
+- `WORKSPACE_STATE.json` and `.workspace_state_backups/` are local-only and Git-ignored.
+- `bash workspace.sh doctor` is diagnostic/read-only and fails on missing/stale/corrupt state;
+  it does **not** rewrite metadata or install anything.
+- `bash workspace.sh doctor --repair` backs up any present state and rewrites metadata
+  only when venv and required workspace directories are independently verified.
+- `bash workspace.sh upgrade` stamps `ready` and the code version only after its normal
+  upgrade operations succeed; it can recover a missing state file on a valid workspace.
+- Never run `run_me_first.sh` solely to repair state metadata. Never delete or replace
+  `.venv`, project versions, immutable run snapshots, models or evaluation results.
+- If `WORKSPACE_STATE.json` remains tracked by Git despite `.gitignore`, remove it from
+  Git's index using a reviewed `git rm --cached WORKSPACE_STATE.json` change, not deletion.

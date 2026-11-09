@@ -10,6 +10,7 @@ from toolkit.dataset import validate
 from toolkit.wizard import hardware, display_models, confirm
 from toolkit.run_wizard import wizard as training_wizard
 from toolkit.data_package import initialize, inspect, validate_package, assistant_wizard, migrate_legacy
+from toolkit import workspace_state
 
 
 PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|shared-eval VERSION --run ID --benchmark NAME|status|handoff}\' ;;\nesac\n'
@@ -28,7 +29,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.9'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.4.0'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +171,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.9','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.4.0','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -506,22 +507,22 @@ def export_model(project,version,run_id=None,fmt='hf'):
 
 
 def upgrade():
-    config=read(ROOT/'config/workspace.json')
-    statefile=ROOT/'WORKSPACE_STATE.json'
-    require(statefile.exists(),'Workspace not installed: run run_me_first.sh first')
-    state=read(statefile)
-    require((ROOT/'.venv/pyvenv.cfg').exists(),'Cannot upgrade without local .venv')
-    old=state.get('toolkit_version')
-    state['toolkit_version']=config['toolkit_version']
-    state['last_upgrade_utc']=utc()
+    health=workspace_state.inspect(ROOT)
+    require(health.environment_ready,
+            'Cannot upgrade unhealthy workspace: '+ '; '.join(health.environment_problems))
+    old=(health.state or {}).get('toolkit_version', 'MISSING')
     for project in (ROOT/'projects').iterdir():
         if (project/'project.json').is_file():
             (project/'project.sh').write_text(PROJECT_LAUNCHER,encoding='utf-8')
-            for folder in (project/'versions').iterdir():
-                if (folder/'version.json').exists() and migrate_legacy(folder):
-                    print('MIGRATED DATA CONTRACT (preserved original files):',folder)
-    write(statefile,state)
-    print('UPGRADED WORKSPACE',old,'->',config['toolkit_version'],'(existing .venv, projects, and runs preserved)')
+            versions=project/'versions'
+            if versions.is_dir():
+                for folder in versions.iterdir():
+                    if (folder/'version.json').exists() and migrate_legacy(folder):
+                        print('MIGRATED DATA CONTRACT (preserved original files):',folder)
+    # Refresh metadata only after all upgrade operations completed successfully.
+    result,backup,_=workspace_state.repair(ROOT,upgrade=True)
+    if backup: print('WORKSPACE_STATE_BACKUP',backup)
+    print('UPGRADED WORKSPACE',old,'->',result.version,'(existing .venv, projects, and runs preserved)')
 
 
 def list_projects():
@@ -551,11 +552,24 @@ def status(project,version=None):
             print('  RUN',m['run_id'],'STATUS',m['status'])
         if not found:print('  STATUS draft (no training runs)')
 
-def doctor():
-    state=read(ROOT/'WORKSPACE_STATE.json')
+def doctor(*, repair=False):
+    health=workspace_state.inspect(ROOT)
+    if repair:
+        health,backup,changed=workspace_state.repair(ROOT)
+        print('WORKSPACE_STATE_REPAIRED' if changed else 'WORKSPACE_STATE_ALREADY_HEALTHY')
+        if backup: print('WORKSPACE_STATE_BACKUP',backup)
     print('WORKSPACE',ROOT)
-    print('TOOLKIT_CODE_VERSION',read(ROOT/'config/workspace.json')['toolkit_version'])
-    print('STATE',json.dumps(state,indent=2))
+    print('TOOLKIT_CODE_VERSION',health.version)
+    print('STATE',json.dumps(health.state,indent=2) if health.state is not None else '<missing or unreadable>')
+    if (ROOT/'.git').exists():
+        tracked=subprocess.run(['git','-C',str(ROOT),'ls-files','--error-unmatch','--','WORKSPACE_STATE.json'],
+                               capture_output=True,text=True)
+        if tracked.returncode==0:
+            print('WARNING: WORKSPACE_STATE.json is tracked by Git. Use git rm --cached WORKSPACE_STATE.json in a reviewed source commit.')
+    for issue in health.environment_problems: print('ENVIRONMENT_PROBLEM',issue)
+    for issue in health.metadata_problems: print('WORKSPACE_STATE_PROBLEM',issue)
+    if health.repairable and not repair:
+        print('WORKSPACE_STATE_REPAIR_AVAILABLE: bash workspace.sh doctor --repair')
     print('VIRTUALENV',sys.prefix, 'isolated:',sys.prefix!=sys.base_prefix)
     print('PYTHON',sys.version.split()[0]);print('PLATFORM',platform.platform())
     print('DISK_FREE_GB',round(shutil.disk_usage(ROOT).free/1024**3,2))
@@ -573,7 +587,12 @@ def doctor():
     if util.find_spec('unsloth') is not None:
         try:print('UNSLOTH_VERSION',metadata.version('unsloth'))
         except metadata.PackageNotFoundError:print('UNSLOTH_VERSION unknown')
-    print('READY' if sys.prefix!=sys.base_prefix else 'WARNING: not running from isolated venv')
+    if health.healthy and sys.prefix!=sys.base_prefix:
+        print('READY')
+    else:
+        print('WARNING: workspace is not fully healthy')
+        if sys.prefix==sys.base_prefix: print('WARNING: not running from isolated venv')
+        raise SystemExit(1)
 
 
 def list_runs(project=None):
@@ -635,9 +654,9 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.9')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.4.0')
     sub=p.add_subparsers(dest='command',required=True)
-    sub.add_parser('doctor')
+    a=sub.add_parser('doctor');a.add_argument('--repair',action='store_true',help='Repair only validated workspace state metadata (with backup)')
     sub.add_parser('upgrade')
     sub.add_parser('hardware')
     sub.add_parser('models')
@@ -717,7 +736,7 @@ def main():
     a=sub.add_parser('handoff');a.add_argument('project')
     a=p.parse_args()
     try:
-        if a.command=='doctor':doctor()
+        if a.command=='doctor':doctor(repair=a.repair)
         elif a.command=='upgrade':upgrade()
         elif a.command=='hardware':print(json.dumps(hardware(),indent=2))
         elif a.command=='models':display_models()

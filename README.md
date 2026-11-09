@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.9
+# Model Training Toolkit v0.4.0
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -212,6 +212,26 @@ bash workspace.sh resume eli v9.1 --run RUN_ID --checkpoint step_0000500
 ```
 
 The `resume` command reuses the frozen input snapshot and settings; it neither starts another run nor changes the dataset. Only checkpoints created by v0.3.6 or later are fully resumable. See [Resumable checkpoints](docs/RESUMABLE_CHECKPOINTS.md) for safety, disk-space, and verification details. Existing adapter-only checkpoints cannot resume optimizer state.
+
+
+## Workspace health and state recovery (v0.4.0)
+
+`WORKSPACE_STATE.json` is a **machine-local metadata file**, not a source file or a record of
+model/training configuration. It is excluded from Git, along with read-only safety backups
+under `.workspace_state_backups/`. Do not commit it.
+
+- `bash workspace.sh doctor` is **read-only**. It checks the workspace environment and
+  reports missing, stale or corrupt state rather than trusting the state file as proof
+  the workspace is functional. It exits nonzero when the workspace is unhealthy.
+- `bash workspace.sh doctor --repair` backs up any existing state file, then repairs **only**
+  state metadata after validating the local venv, interpreter, and basic workspace layout.
+  Missing, stale, and corrupt state can be recovered without rerunning bootstrap. Broken
+  environments are never marked ready automatically.
+- `bash workspace.sh upgrade` validates the environment and refreshes state metadata
+  **after** any project launcher/data-contract upgrade operations have succeeded.
+  It can recover a lost state file and does not reinstall packages or change frozen runs.
+
+See [docs/WORKSPACE_HEALTH.md](docs/WORKSPACE_HEALTH.md).
 
 ## Targeted benchmark evaluation (v0.3.9)
 
