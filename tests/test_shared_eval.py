@@ -89,6 +89,61 @@ class SharedEvaluationBridge(unittest.TestCase):
         self.assertEqual(cmd[1],str(self.bench/'gate_report.py'))
         self.assertEqual(cmd[-1],str(out))
 
+    def test_delegates_one_or_several_targeted_suites_without_stage(self):
+        with patch('toolkit.shared_eval.subprocess.run') as call:
+            shared_eval.execute('eli','v9.2',self.run_id,'benchmark-v1.0.1',
+                model='m:v1',suites=['v72_graph_26','v81_corrective_16,v9_compositional_160'],
+                dry_run=True,workspace=self.root)
+        cmd=call.call_args.args[0]
+        self.assertNotIn('--stage',cmd)
+        self.assertEqual([cmd[i+1] for i,item in enumerate(cmd[:-1]) if item=='--suite'],
+                         ['v72_graph_26','v81_corrective_16,v9_compositional_160'])
+        self.assertIn('--dry-run',cmd)
+
+    def test_list_suites_readonly_without_ollama_or_model(self):
+        # Add a targeted suite so --list-suites displays both suite classes.
+        from contextlib import redirect_stdout
+        import io
+        base=json.loads((self.bench/'benchmark_manifest.json').read_text(encoding='utf-8'))
+        base['targeted_suites']=[{'name':'mini','dataset':'cases/frozen_715.jsonl',
+                                  'count':1,'stage':'generalization','mode':'gold',
+                                  'source_filter':'one','subset_of':'frozen_715'}]
+        write(self.bench/'benchmark_manifest.json',base)
+        capture=io.StringIO()
+        with patch('toolkit.shared_eval.subprocess.run') as call:
+            with redirect_stdout(capture):
+                self.assertIsNone(shared_eval.execute('eli','v9.2',self.run_id,
+                                  'benchmark-v1.0.1',list_suites=True,workspace=self.root))
+        self.assertEqual(call.call_count,1) # integrity audit only; no inference process
+        self.assertIn('CANONICAL frozen_715',capture.getvalue())
+        self.assertIn('TARGETED mini',capture.getvalue())
+        self.assertFalse((self.run/'shared_evaluations').exists())
+
+    def test_reject_ambiguous_or_incompatible_selection(self):
+        with self.assertRaisesRegex(ValueError,'mutually exclusive'):
+            shared_eval.execute('eli','v9.2',self.run_id,'benchmark-v1.0.1',
+                                model='m:v1',stage='all',suites=['frozen_715'],workspace=self.root)
+        with self.assertRaisesRegex(ValueError,'read-only'):
+            shared_eval.execute('eli','v9.2',self.run_id,'benchmark-v1.0.1',
+                                model='m:v1',list_suites=True,workspace=self.root)
+        with self.assertRaisesRegex(ValueError,'--model is required'):
+            shared_eval.execute('eli','v9.2',self.run_id,'benchmark-v1.0.1',
+                                suites=['frozen_715'],workspace=self.root)
+
+    def test_targeted_dataset_digest_checked(self):
+        original=self.bench/'cases/frozen_715.jsonl'
+        target=self.bench/'cases/target.jsonl'
+        target.write_bytes(original.read_bytes())
+        manifest=json.loads((self.bench/'benchmark_manifest.json').read_text())
+        manifest['targeted_suites']=[{'name':'mini','dataset':'cases/target.jsonl',
+                                     'count':1,'stage':'generalization','mode':'gold'}]
+        manifest['frozen_files_sha256']['cases/target.jsonl']=digest(target)
+        write(self.bench/'benchmark_manifest.json',manifest)
+        self.assertEqual(shared_eval.plan('eli','v9.2',self.run_id,'benchmark-v1.0.1',workspace=self.root)['package_version'],'1.0.1')
+        target.write_text('tampered',encoding='utf-8')
+        with self.assertRaisesRegex(ValueError,'checksum mismatch'):
+            shared_eval.plan('eli','v9.2',self.run_id,'benchmark-v1.0.1',workspace=self.root)
+
     def test_reject_active_run(self):
         meta=json.loads((self.run/'run.json').read_text());meta['status']='training'
         write(self.run/'run.json',meta)

@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.8'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.9'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.8','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.9','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -635,7 +635,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.8')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.9')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -696,7 +696,9 @@ def main():
     a.add_argument('--run',required=True,help='Completed training run that supplies frozen prompt/train inputs')
     a.add_argument('--benchmark',required=True,help='Project evaluations directory name, e.g. benchmark-v1.0.1')
     a.add_argument('--model',help='Exact Ollama model tag; required unless --audit-only')
-    a.add_argument('--stage',help='generalization, regressions, diagnostic, or all (runner-defined)')
+    a.add_argument('--stage',help='Run cumulative stages: generalization, regressions, diagnostic, all')
+    a.add_argument('--suite',action='append',help='Target specific named suites; repeat or comma-separate; exclusive with --stage')
+    a.add_argument('--list-suites',action='store_true',help='List canonical and targeted suites; no Ollama required')
     a.add_argument('--resume',action='store_true',help='Resume this model + benchmark output')
     a.add_argument('--dry-run',action='store_true',help='Read-only evaluation plan; checks Ollama model identity')
     a.add_argument('--smoke',type=int,default=0,help='Run 1-25 predictions without saving evaluation results')
@@ -741,7 +743,7 @@ def main():
         elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only,runner=a.runner,suite=a.suite,model=a.model,model_path=a.model_path,checkpoint=a.checkpoint,resume_eval=a.resume_eval,dry_run=a.dry_run,eval_package=a.eval_package)
         elif a.command=='shared-eval':
             from toolkit.shared_eval import execute as shared_eval
-            shared_eval(a.project,a.version,a.run,a.benchmark,model=a.model,stage=a.stage,
+            shared_eval(a.project,a.version,a.run,a.benchmark,model=a.model,stage=a.stage,suites=a.suite,list_suites=a.list_suites,
                         resume=a.resume,dry_run=a.dry_run,smoke=a.smoke,
                         audit_only=a.audit_only,gate_only=a.gate_only,
                         reference_results=a.reference_results,url=a.url,num_ctx=a.num_ctx,

@@ -56,3 +56,38 @@ The V9.2 24,501-row training recall is a separate, version-specific baseline.
 Its output remains untouched. Unlabeled suite diagnostics do not contribute to
 accuracy. The first V1.0.1 gate policy is provisional, and compiler execution
 is not part of this fast Ollama runner.
+
+## Targeted suites (MTT v0.3.9; ELI benchmark v1.0.2)
+
+The benchmark is immutable. Choose `benchmark-v1.0.2` for individually
+addressable V7 513, V7.2 graph 26, V8.1 corrective 16, and V9 compositional
+160 cases. The original 715 remains the authoritative release benchmark.
+The toolkit delegates selection to the trusted project runner; it never
+rewrites test cases or the historical scorer.
+
+```bash
+RUN=run_20261109T002925408171Z_a4a5de
+B=benchmark-v1.0.2
+M=datmm-eli:v9.2-f16
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" --benchmark "$B" --list-suites
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" --benchmark "$B" --model "$M" --suite v72_graph_26 --dry-run
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" --benchmark "$B" --model "$M" --suite v72_graph_26
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" --benchmark "$B" --model "$M" --suite v81_corrective_16,v802_labeled_24 --resume
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" --benchmark "$B" --model "$M" --stage all --resume
+```
+
+`--suite NAME` is repeatable and accepts comma-separated names. `--stage`
+remains cumulative. `--stage` and `--suite` are mutually exclusive; `--suite
+all` runs the six canonical suites without duplicate targeted splits. The
+benchmark runner validates every name against its immutable manifest, and
+reports exact suite count, mode, model digest, prompt SHA-256, per-suite
+SHA-256 and package version. Targeted views are not extra independent gold
+cases and never increase the 715 denominator. Completed canonical predictions
+can be reused for targeted views and all four completed targeted views can
+reconstruct the full 715, using verified completion receipts. No existing
+v1.0.1 outputs or version-specific training baselines are modified.
+
+`--gate-only` continues to require the canonical original 715 and focused
+regressions, regardless of which development subsets ran. Gate policy is
+provisional. `--list-suites` requires a completed run for snapshot audit but
+never connects to Ollama.
