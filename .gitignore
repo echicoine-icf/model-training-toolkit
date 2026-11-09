@@ -8,3 +8,4 @@ registry/*.jsonl
 registry/installed_requirements.txt
 projects/*/versions/*/data/*.jsonl
 registry/pip_freeze_before_unsloth.txt
+/WORKSPACE_STATE.json
