@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.6'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.7'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.6','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.7','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -395,18 +395,71 @@ def chosen_run(project,version,run_id=None):
     return sorted(candidates)[-1]
 
 
-def evaluate(project,version,run_id=None,*,base_only=False):
+def evaluate(project,version,run_id=None,*,base_only=False,runner=None,suite='all',
+             model='adapter',model_path=None,checkpoint='latest',resume_eval=False,dry_run=False,eval_package=None):
+    from toolkit.evaluation_plugins import registered, resolve_model, run as run_custom, freeze_evaluation_package
     if base_only:
+        require(not registered(version_path(project,version)),
+                '--base-only is available only with legacy built-in evaluation')
         require(run_id is None,'--base-only cannot be combined with --run')
         folder,meta=new_run(project,version)
         meta=update_run(folder,meta,'evaluating_base',{'run_kind':'baseline'})
         adapter=None
     else:
         folder=chosen_run(project,version,run_id)
-        meta=read(folder/'run.json');require(meta['status'] in ('trained','evaluated','exported','evaluation_failed'),'Run not trained')
-        adapter=folder/'adapter';require(adapter.is_dir(),'Missing adapter output')
+        meta=read(folder/'run.json')
+        require(meta['status'] in ('trained','evaluated','exported','evaluation_failed','interrupted','failed'),
+                'Cannot evaluate a run while training is active')
+        adapter=folder/'adapter'
     assert_snapshot(folder/'input')
     validate_package(folder/'input',need_eval=True)
+    # External packages let older frozen runs gain evaluation capabilities
+    # without modifying the immutable training snapshot.
+    external = None
+    if eval_package:
+        source_package=Path(eval_package).expanduser()
+        external=source_package if dry_run else freeze_evaluation_package(folder,source_package)
+    elif not registered(folder/'input') and resume_eval:
+        options=sorted(x for x in (folder/'evaluation_packages').glob('*')
+                       if x.is_dir() and (x/'evaluation/runners.json').is_file())
+        if len(options)==1:
+            external=options[0]
+        elif len(options)>1:
+            raise ValueError('Multiple frozen evaluator packages; pass --eval-package to select one')
+    if registered(folder/'input') or external is not None:
+        require(not base_only,'Custom evaluation requires an existing training run')
+        spec=resolve_model(folder,folder/'input',model=model,model_path=model_path,checkpoint=checkpoint)
+        from toolkit.evaluation_plugins import load_registry
+        config=load_registry(folder/'input',evaluation_package=external)
+        if runner not in (None,'custom'):
+            require(runner in config['runners'],f'Unknown registered runner: {runner}')
+        out=folder/'evaluations_custom'
+        if dry_run:
+            return run_custom(folder/'input',out,model_spec=spec,
+                              runner_name=runner if runner!='custom' else None,
+                              suite=suite,resume=resume_eval,dry_run=True,evaluation_package=external)
+        try:
+            score=run_custom(folder/'input',out,model_spec=spec,
+                             runner_name=runner if runner!='custom' else None,
+                             suite=suite,resume=resume_eval,evaluation_package=external)
+            # Stage-only baseline is not equivalent to completed generalization.
+            if suite=='all':
+                update_run(folder,meta,'evaluated',{'custom_evaluation_summary':score})
+            else:
+                meta['custom_evaluation_summary']=score
+                write(folder/'run.json',meta)
+            print('CUSTOM EVALUATION RESULTS',out,flush=True)
+            return score
+        except Exception as exc:
+            update_run(folder,meta,'evaluation_failed',{'evaluation_error':str(exc)})
+            raise
+    require(runner is None and suite=='all' and model=='adapter' and model_path is None
+            and checkpoint=='latest' and not resume_eval and not dry_run,
+            'Custom evaluator options require frozen evaluation/runners.json')
+    if not base_only:
+        require(meta['status'] in ('trained','evaluated','exported','evaluation_failed'),
+                'Legacy evaluation requires completed training')
+        require(adapter.is_dir(),'Missing adapter output')
     out=folder/'evaluation'
     require(not out.exists(),f'Evaluation already exists for this run: {out}; create a new run instead of overwriting')
     from toolkit.eval_engine import run as engine
@@ -582,7 +635,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.6')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.7')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -630,6 +683,14 @@ def main():
     a.add_argument('--run',required=True,help='Existing run ID, not a new run')
     a.add_argument('--checkpoint',default='latest',help='latest or step_0002000')
     a=sub.add_parser('evaluate');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--base-only',action='store_true')
+    a.add_argument('--runner',help='custom, or a registered evaluator name')
+    a.add_argument('--suite',default='all',help='all, or last stage to execute (earlier stages first)')
+    a.add_argument('--model',default='adapter',help='adapter, merged, checkpoint or explicit model path')
+    a.add_argument('--model-path',help='Explicit adapter or merged Hugging Face model directory')
+    a.add_argument('--checkpoint',default='latest',help='Checkpoint name, e.g. step_0002000')
+    a.add_argument('--resume',dest='resume_eval',action='store_true',help='Resume existing evaluation')
+    a.add_argument('--dry-run',action='store_true',help='Validate model and stage plan only')
+    a.add_argument('--eval-package',help='Extra evaluation package directory; captured separately from training inputs')
     a=sub.add_parser('export');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--format',choices=['hf','gguf'],default='hf')
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
     a=sub.add_parser('runs');a.add_argument('--project')
@@ -659,7 +720,7 @@ def main():
             require(not (a.guided and has_flags),'--guided cannot be combined with noninteractive training flags')
             train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))
         elif a.command=='resume':resume(a.project,a.version,a.run,checkpoint=a.checkpoint)
-        elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only)
+        elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only,runner=a.runner,suite=a.suite,model=a.model,model_path=a.model_path,checkpoint=a.checkpoint,resume_eval=a.resume_eval,dry_run=a.dry_run,eval_package=a.eval_package)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)
@@ -667,7 +728,7 @@ def main():
     except KeyboardInterrupt:
         print('INTERRUPTED. Resume this same run with: bash workspace.sh resume PROJECT VERSION --run RUN_ID',file=sys.stderr)
         return 130
-    except (ValueError,FileNotFoundError,RuntimeError,KeyError,EOFError) as ex:
+    except (ValueError,FileNotFoundError,FileExistsError,RuntimeError,KeyError,EOFError) as ex:
         print('ERROR:',ex,file=sys.stderr);return 1
     return 0
 

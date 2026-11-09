@@ -1,3 +1,11 @@
+## v0.3.7 — Custom project evaluation runners
+
+- Added project-configured Python scorers, ordered baseline-first stages, read-only unified adapter/merged/checkpoint model access, and standard reports.
+- Added frozen external evaluation packages for older completed runs (no modifications to immutable training inputs or weights).
+- Added resumable per-case inference, separate labeled and unlabeled suites, integrity fingerprints, atomic evaluator-package capture and non-destructive failure handling.
+- Auto-eval uses custom registered runners only when included in the version data before training. Unregistered versions retain the previous exact-JSON evaluation.
+- Added 16 offline evaluation tests; no actual GPU V9.2 evaluation has yet been performed.
+
 ## v0.3.6 — Safe, complete optimizer/RNG checkpoint resume
 
 - Windows checkpoint durability hotfix: reopen saved artifacts with writable file descriptors for `os.fsync`; add cross-platform regression test.

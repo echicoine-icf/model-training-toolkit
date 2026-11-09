@@ -12,6 +12,11 @@ def normalize(x):
 
 
 def run(snapshot,out,adapter=None):
+    # Default exact evaluator is unchanged for unregistered projects.
+    from .evaluation_plugins import registered, run as run_custom, resolve_model
+    if registered(Path(snapshot)):
+        model_spec = resolve_model(Path(out).parent, snapshot, 'adapter')
+        return run_custom(snapshot, Path(out).parent/'evaluations_custom', model_spec=model_spec)
     try:
         import torch
         from transformers import AutoModelForCausalLM,AutoTokenizer
