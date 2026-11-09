@@ -1,3 +1,13 @@
+## Unreleased — project snapshot publisher utility
+
+- Add a standalone, standard-library Git publisher for an independently
+  hosted MTT project source/training/evaluation snapshot. No changes to
+  operational Git remotes, ignore rules, or model artifacts.
+- Preserve the selected run's frozen input hashes/configuration and selected
+  versioned benchmarks; record SHA-256 file integrity and package versions.
+- Reject hidden credentials, large Git files, and silent mutation of published
+  model-version or benchmark files. Support preview and explicit publish.
+
 ## v0.4.0 — Safe workspace diagnostics and metadata repair
 
 - `workspace.sh doctor` is read-only: diagnose missing, stale, invalid, and inconsistent

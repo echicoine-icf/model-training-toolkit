@@ -236,3 +236,12 @@ See [docs/WORKSPACE_HEALTH.md](docs/WORKSPACE_HEALTH.md).
 ## Targeted benchmark evaluation (v0.3.9)
 
 Use `shared-eval ... --list-suites`, `--suite v72_graph_26`, repeated/comma-separated `--suite` options, or `--stage all` against ELI `benchmark-v1.0.2`. See `docs/SHARED_EVALUATIONS.md` and `INSTALL_v0.3.9.md`. Existing 0.3.8 behavior stays supported.
+
+## Publish a reproducible project snapshot
+
+To preserve a project version's training corpus, frozen run settings and shared
+evaluation cases in an **independent** GitHub repository without modifying
+MTT's `origin` or `.gitignore`, use `scripts/publish_project_snapshot.py`.
+The command previews by default and requires an explicit `--push` and
+repository visibility acknowledgement to publish. It excludes trained weights
+and checkpoints. See [Project snapshot publishing](docs/PROJECT_SNAPSHOTS.md).
