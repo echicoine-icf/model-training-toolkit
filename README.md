@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.7
+# Model Training Toolkit v0.3.8
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -97,6 +97,38 @@ can instead attach an external immutable evaluation package with `--eval-package
 
 See [CUSTOM_EVALUATION_RUNNERS.md](docs/CUSTOM_EVALUATION_RUNNERS.md).
 
+## Project-level shared evaluation benchmarks (v0.3.8)
+
+Project-owned benchmarks live at `projects/<project>/evaluations/<benchmark-name>/`,
+independently of model version. Each package declares an explicit **package version**
+and per-dataset SHA-256 hashes in its benchmark manifest; the historical semantic
+scoring contract can remain unchanged as more reviewed cases are added.
+
+`shared-eval` audits the benchmark against the selected run's **frozen** training
+snapshot (including protected-holdout leakage), uses the run's frozen system prompt,
+and stores model-specific results under the existing run's `shared_evaluations/`.
+No training artifacts or earlier reports are overwritten. The project-owned Python
+runner (Ollama for ELI) performs inference; MTT only handles safe selection, audit,
+and delegation. Compare only results with matching benchmark package, case hashes,
+scorer and model/inference provenance.
+
+```bash
+bash projects/eli/project.sh shared-eval v9.2 \
+  --run RUN_ID --benchmark benchmark-v1.0.1 \
+  --audit-only
+
+bash projects/eli/project.sh shared-eval v9.2 \
+  --run RUN_ID --benchmark benchmark-v1.0.1 \
+  --model datmm-eli:v9.2-f16 --stage generalization --dry-run
+
+bash projects/eli/project.sh shared-eval v9.2 \
+  --run RUN_ID --benchmark benchmark-v1.0.1 \
+  --model datmm-eli:v9.2-f16 --stage generalization
+```
+
+See `docs/SHARED_EVALUATIONS.md`. The original V9.2 training-baseline results
+remain version-specific and are **not** repeated by the shared command.
+
 ## Sanity checks
 
 ```bash
@@ -106,7 +138,7 @@ bash workspace.sh --help
 
 ## Important boundaries
 
-The model suitability list is conservative guidance, **not** a guarantee the GPU can train a selected architecture. CUDA LoRA fine-tuning, not QLoRA or full-model training, is currently supported. Evaluation is exact JSON matching only; semantic scoring of DATMM graph queries is future work. Actual training, Hugging Face downloads, and inference require the ML optional dependencies and have not been verified on every GPU architecture.
+The model suitability list is conservative guidance, **not** a guarantee the GPU can train a selected architecture. CUDA LoRA fine-tuning, not QLoRA or full-model training, is currently supported. The built-in evaluator uses exact JSON matching; project-supplied evaluators can implement DATMM semantic scoring without changing MTT. Actual training, Hugging Face downloads, and inference require the ML optional dependencies and have not been verified on every GPU architecture.
 
 ## GPU-aware PyTorch setup (v0.3.2)
 

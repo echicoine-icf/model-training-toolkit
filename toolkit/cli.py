@@ -12,7 +12,7 @@ from toolkit.run_wizard import wizard as training_wizard
 from toolkit.data_package import initialize, inspect, validate_package, assistant_wizard, migrate_legacy
 
 
-PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|status|handoff}\' ;;\nesac\n'
+PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|shared-eval VERSION --run ID --benchmark NAME|status|handoff}\' ;;\nesac\n'
 
 def scaffold_project_launcher(dest):
     dest=Path(dest)
@@ -28,7 +28,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.7'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.3.8'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -170,7 +170,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.7','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.3.8','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -635,7 +635,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.7')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.3.8')
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
     sub.add_parser('upgrade')
@@ -691,6 +691,24 @@ def main():
     a.add_argument('--resume',dest='resume_eval',action='store_true',help='Resume existing evaluation')
     a.add_argument('--dry-run',action='store_true',help='Validate model and stage plan only')
     a.add_argument('--eval-package',help='Extra evaluation package directory; captured separately from training inputs')
+    a=sub.add_parser('shared-eval',help='Project-level immutable shared benchmark (Ollama)')
+    a.add_argument('project');a.add_argument('version')
+    a.add_argument('--run',required=True,help='Completed training run that supplies frozen prompt/train inputs')
+    a.add_argument('--benchmark',required=True,help='Project evaluations directory name, e.g. benchmark-v1.0.1')
+    a.add_argument('--model',help='Exact Ollama model tag; required unless --audit-only')
+    a.add_argument('--stage',help='generalization, regressions, diagnostic, or all (runner-defined)')
+    a.add_argument('--resume',action='store_true',help='Resume this model + benchmark output')
+    a.add_argument('--dry-run',action='store_true',help='Read-only evaluation plan; checks Ollama model identity')
+    a.add_argument('--smoke',type=int,default=0,help='Run 1-25 predictions without saving evaluation results')
+    mode=a.add_mutually_exclusive_group()
+    mode.add_argument('--audit-only',action='store_true',help='Offline holdout integrity/overlap audit; no Ollama required')
+    mode.add_argument('--gate-only',action='store_true',help='Read-only release-gate report for completed results')
+    a.add_argument('--reference-results',help='Optional prior shared evaluation output; requires --gate-only')
+    a.add_argument('--url',help='Ollama API URL (runner default: http://127.0.0.1:11434)')
+    a.add_argument('--num-ctx',type=int)
+    a.add_argument('--num-predict',type=int)
+    a.add_argument('--seed',type=int)
+    a.add_argument('--timeout',type=int)
     a=sub.add_parser('export');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--format',choices=['hf','gguf'],default='hf')
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
     a=sub.add_parser('runs');a.add_argument('--project')
@@ -721,6 +739,13 @@ def main():
             train(a.project,a.version,guided=(a.guided or not has_flags),train_args=(None if a.guided or not has_flags else a))
         elif a.command=='resume':resume(a.project,a.version,a.run,checkpoint=a.checkpoint)
         elif a.command=='evaluate':evaluate(a.project,a.version,a.run,base_only=a.base_only,runner=a.runner,suite=a.suite,model=a.model,model_path=a.model_path,checkpoint=a.checkpoint,resume_eval=a.resume_eval,dry_run=a.dry_run,eval_package=a.eval_package)
+        elif a.command=='shared-eval':
+            from toolkit.shared_eval import execute as shared_eval
+            shared_eval(a.project,a.version,a.run,a.benchmark,model=a.model,stage=a.stage,
+                        resume=a.resume,dry_run=a.dry_run,smoke=a.smoke,
+                        audit_only=a.audit_only,gate_only=a.gate_only,
+                        reference_results=a.reference_results,url=a.url,num_ctx=a.num_ctx,
+                        num_predict=a.num_predict,seed=a.seed,timeout=a.timeout,workspace=ROOT)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)

@@ -1,3 +1,15 @@
+## v0.3.8 — Project-level shared benchmarks
+
+- Add `shared-eval` to MTT core and project launchers, referencing immutable project-owned
+  benchmark packages independently of each training version.
+- Use completed training run's frozen prompt and corpus, audit protected holdout
+  overlaps, and store evaluation results under that existing run.
+- Require benchmark package version and dataset hash manifest; project evaluation
+  scripts record per-suite version/hash provenance for cross-version comparisons.
+- Support Ollama stage selection, resumable evaluation, read-only smoke/dry-run,
+  and release gates. Preserve existing training/evaluation commands and datasets.
+- No new dependencies, model downloads, or environment installation needed.
+
 ## v0.3.7 — Custom project evaluation runners
 
 - Added project-configured Python scorers, ordered baseline-first stages, read-only unified adapter/merged/checkpoint model access, and standard reports.

@@ -246,3 +246,16 @@ modifying their training snapshots. Preserve raw per-case predictions and resume
 by fingerprint. Never mix unlabeled diagnostics into gold accuracy. Keep
 domain-specific scorer code in the project package, not in the toolkit engine.
 Do not publish private project evaluation assets from this repository.
+
+## Shared project evaluation (v0.3.8)
+
+Do not put cumulative ELI benchmark tests in each `versions/vX.Y/data` package.
+Place versioned immutable benchmark folders in `projects/eli/evaluations/`, with
+`benchmark_manifest.json` describing package version, datasets and SHA-256.
+Use `bash projects/eli/project.sh shared-eval VERSION --run RUN_ID --benchmark benchmark-v1.0.1 ...`.
+Only evaluate completed runs; MTT always uses the frozen system prompt and checks
+protected holdout/training overlap before running. Store results under each run,
+not in Git-tracked benchmark folders. Do not change V7 semantic scoring functions.
+Every evaluation report must record benchmark package version AND its dataset hash.
+Comparison requires matching package, datasets, scorer and contract provenance.
+The V9.2 24,501-row training-baseline result belongs only to the V9.2 run.
