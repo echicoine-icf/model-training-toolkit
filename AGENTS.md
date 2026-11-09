@@ -236,3 +236,13 @@ Read `docs/UNSLOTH_BACKEND.md` before enabling Unsloth. The default `--backend p
 ## 10. Checkpoint recovery (v0.3.6+)
 
 Use `--save-every 500 --keep-last-checkpoints 3` in new one-shot training commands unless the user explicitly chooses another interval. These are **full optimizer and RNG checkpoints**, not adapter-only. After an interrupted run, **do not start a new `train` command**: recover the original run using `bash workspace.sh resume PROJECT VERSION --run RUN_ID` or `bash projects/PROJECT/project.sh resume VERSION --run RUN_ID`. This uses frozen inputs and the original configuration; no new hyperparameters are allowed. An older retained checkpoint can be selected with `--checkpoint step_0000500`. Never alter the snapshot, state files, or original data to force a resume. See `docs/RESUMABLE_CHECKPOINTS.md` for integrity checks and trusted-checkpoint restrictions. v0.3.5-era adapter-only snapshots cannot recover optimizer state.
+
+## Evaluation runners (v0.3.7)
+
+Follow docs/CUSTOM_EVALUATION_RUNNERS.md. Frozen version evaluation manifests
+can declare generic stage ordering, dataset requirements, model types and custom
+Python scorer scripts. Use `--eval-package` for older completed runs without
+modifying their training snapshots. Preserve raw per-case predictions and resume
+by fingerprint. Never mix unlabeled diagnostics into gold accuracy. Keep
+domain-specific scorer code in the project package, not in the toolkit engine.
+Do not publish private project evaluation assets from this repository.

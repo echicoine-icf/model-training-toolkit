@@ -79,7 +79,8 @@ def inspect(folder,need_eval=False):
 
 def validate_package(folder,need_eval=False):
     folder=Path(folder);cfg=contract(folder)
-    report=inspect(folder,need_eval=need_eval)
+    from .evaluation_plugins import registered, load_registry
+    report=inspect(folder,need_eval=(need_eval and not registered(folder)))
     if report['missing']:
         raise ValueError('Missing version data: '+', '.join(report['missing'])+'; run bash workspace.sh data wizard PROJECT VERSION or supply a package')
     root=folder/'data'
@@ -87,13 +88,24 @@ def validate_package(folder,need_eval=False):
         if (root/'schema.json').is_file():json.loads((root/'schema.json').read_text(encoding='utf-8'))
     train=rows(root/'train.jsonl')
     ev=rows(root/'eval.jsonl') if (root/'eval.jsonl').is_file() and (root/'eval.jsonl').stat().st_size>0 else []
-    if need_eval and not ev:raise ValueError('Evaluation requested but eval.jsonl has no cases')
+    evaluation_plan = load_registry(folder)
+    if need_eval and not ev and evaluation_plan is None:
+        raise ValueError('Evaluation requested but eval.jsonl has no cases and no evaluation/runners.json defined')
+    if evaluation_plan is not None:
+        train_questions = {' '.join(x['question'].casefold().split()) for x in train}
+        for stage in evaluation_plan['stages']:
+            for suite in stage['suites']:
+                # Training recall is not a holdout. Real gold holdouts must be disjoint.
+                if suite['mode'] == 'gold' and suite['source'].name != 'train.jsonl':
+                    overlap = train_questions & {' '.join(c['question'].casefold().split()) for c in suite['cases']}
+                    if overlap:
+                        raise ValueError(f'Holdout {suite["name"]} overlaps training: {len(overlap)} questions')
     trainq={' '.join(x['question'].casefold().split()) for x in train}
     evalq={' '.join(x['question'].casefold().split()) for x in ev}
     intersection=trainq&evalq
     if intersection:raise ValueError(f'Train/eval overlap: {len(intersection)} normalized questions')
     return {'train':len(train),'eval':len(ev),'exact_question_overlap':0,'package_format':FORMAT,
-            'files_sha256':{p.name:digest(p) for p in sorted(root.iterdir()) if p.is_file()}}
+            'files_sha256':{p.relative_to(root).as_posix():digest(p) for p in sorted(root.rglob('*')) if p.is_file()}}
 
 
 def assistant_wizard(folder,need_eval=False):

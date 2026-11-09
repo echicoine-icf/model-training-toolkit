@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.6
+# Model Training Toolkit v0.3.7
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -87,6 +87,15 @@ model-training-toolkit/
 │   └── training_progress.jsonl
 └── registry/runs.jsonl
 ```
+
+## Project-supplied evaluation runners (v0.3.7)
+
+In addition to the built-in exact-JSON evaluator, a project can register scripts and
+ordered evaluation stages in `data/evaluation/runners.json`. Complete evaluation
+runs can be resumed without regenerating predictions. Existing training snapshots
+can instead attach an external immutable evaluation package with `--eval-package`.
+
+See [CUSTOM_EVALUATION_RUNNERS.md](docs/CUSTOM_EVALUATION_RUNNERS.md).
 
 ## Sanity checks
 
