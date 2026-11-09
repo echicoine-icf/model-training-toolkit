@@ -1,3 +1,11 @@
+## v0.3.9 — Targeted shared evaluation selection
+
+- `shared-eval --suite NAME` can select one, repeated, or comma-separated named suites, independent of cumulative `--stage` selection.
+- `shared-eval --list-suites` audits the frozen run and prints the available canonical and targeted suites without Ollama.
+- Benchmark v1.0.2 adds immutable exact-subset views of historical V7 513, V7.2 graph 26, V8.1 corrective 16, and V9 compositional 160, while keeping the 715 original suite authoritative for release gates.
+- Resumable scorer reuses verified canonical predictions when producing subreports; four fully verified targeted views may be stitched into the original canonical 715, without redundant generation.
+- Independent version/dataset SHA-256 provenance is mandatory for all targeted reports; V7 legacy scorer and the historical cases remain unchanged.
+
 ## v0.3.8 — Project-level shared benchmarks
 
 - Add `shared-eval` to MTT core and project launchers, referencing immutable project-owned

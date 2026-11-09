@@ -1,4 +1,4 @@
-# Model Training Toolkit v0.3.8
+# Model Training Toolkit v0.3.9
 
 An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
 
@@ -212,3 +212,7 @@ bash workspace.sh resume eli v9.1 --run RUN_ID --checkpoint step_0000500
 ```
 
 The `resume` command reuses the frozen input snapshot and settings; it neither starts another run nor changes the dataset. Only checkpoints created by v0.3.6 or later are fully resumable. See [Resumable checkpoints](docs/RESUMABLE_CHECKPOINTS.md) for safety, disk-space, and verification details. Existing adapter-only checkpoints cannot resume optimizer state.
+
+## Targeted benchmark evaluation (v0.3.9)
+
+Use `shared-eval ... --list-suites`, `--suite v72_graph_26`, repeated/comma-separated `--suite` options, or `--stage all` against ELI `benchmark-v1.0.2`. See `docs/SHARED_EVALUATIONS.md` and `INSTALL_v0.3.9.md`. Existing 0.3.8 behavior stays supported.

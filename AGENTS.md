@@ -259,3 +259,7 @@ not in Git-tracked benchmark folders. Do not change V7 semantic scoring function
 Every evaluation report must record benchmark package version AND its dataset hash.
 Comparison requires matching package, datasets, scorer and contract provenance.
 The V9.2 24,501-row training-baseline result belongs only to the V9.2 run.
+
+## Targeted shared evaluation (v0.3.9)
+
+`shared-eval` supports `--list-suites`, repeated or comma-separated `--suite` selections, and unchanged cumulative `--stage`. Never combine `--suite` and `--stage`. In ELI `benchmark-v1.0.2`, targeted 513/26/16/160 are checked exact subsets of immutable frozen_715; they are non-additive development reports, not independent accuracy denominators. The full 715 and focused gold remain release-gate authority. Every report includes package version and dataset hash; no frozen scorer modifications. Existing v1.0.1 runs and V9.2 training baseline stay intact.

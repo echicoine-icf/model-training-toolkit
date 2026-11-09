@@ -75,7 +75,12 @@ def plan(project: str, version: str, run_id: str, benchmark_name: str,
     hashes=data.get('frozen_files_sha256')
     if not isinstance(suites,list) or not isinstance(hashes,dict):
         raise ValueError('Shared benchmark must declare suites and frozen_files_sha256')
-    for suite in suites:
+    names = set()
+    for suite in [*suites, *data.get('targeted_suites', [])]:
+        name = suite.get('name') if isinstance(suite,dict) else None
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError('Duplicate or invalid shared benchmark suite name')
+        names.add(name)
         dataset=suite.get('dataset') if isinstance(suite,dict) else None
         if not isinstance(dataset,str) or dataset not in hashes:
             raise ValueError('Shared benchmark suite is missing a dataset SHA-256')
@@ -94,6 +99,7 @@ def plan(project: str, version: str, run_id: str, benchmark_name: str,
 
 def execute(project: str, version: str, run_id: str, benchmark_name: str, *,
             model: str | None = None, stage: str | None = None,
+            suites: list[str] | None = None, list_suites: bool = False,
             resume: bool = False, dry_run: bool = False, smoke: int = 0,
             audit_only: bool = False, gate_only: bool = False,
             reference_results: str | None = None,
@@ -107,13 +113,17 @@ def execute(project: str, version: str, run_id: str, benchmark_name: str, *,
     shared_evaluations/<benchmark-folder>/<model-tag>/, not in a Git-tracked
     benchmark folder or the existing V9.2 baseline output.
     """
-    if audit_only and (gate_only or model or resume or smoke or reference_results or dry_run):
+    if audit_only and (gate_only or model or resume or smoke or reference_results or dry_run or suites or stage or list_suites):
         raise ValueError('--audit-only cannot be combined with execution or gate flags')
-    if gate_only and (dry_run or resume or smoke or stage):
+    if gate_only and (dry_run or resume or smoke or stage or suites or list_suites):
         raise ValueError('--gate-only cannot be combined with evaluation flags')
     if reference_results and not gate_only:
         raise ValueError('--reference-results requires --gate-only')
-    if not audit_only and not model:
+    if stage and suites:
+        raise ValueError('--stage and --suite are mutually exclusive; choose one selection mode')
+    if list_suites and (model or stage or suites or resume or smoke or dry_run or reference_results or url or any(v is not None for v in (num_ctx,num_predict,seed,timeout))):
+        raise ValueError('--list-suites is read-only; use without evaluation/model options')
+    if not audit_only and not list_suites and not model:
         raise ValueError('--model is required except for --audit-only')
     if smoke < 0 or smoke > 25:
         raise ValueError('--smoke must be between 0 and 25')
@@ -130,6 +140,16 @@ def execute(project: str, version: str, run_id: str, benchmark_name: str, *,
     if audit_only:
         print('SHARED BENCHMARK AUDIT COMPLETE:', spec['benchmark_id'], flush=True)
         return None
+    if list_suites:
+        import json
+        manifest=json.loads((benchmark/'benchmark_manifest.json').read_text(encoding='utf-8'))
+        print('SHARED BENCHMARK',spec['benchmark_id'],'PACKAGE',spec['package_version'])
+        for suite in manifest['suites']:
+            print('CANONICAL',suite['name'], 'stage='+str(suite.get('stage','?')), 'count='+str(suite.get('count','?')), 'mode='+str(suite.get('mode','?')))
+        for suite in manifest.get('targeted_suites',[]):
+            print('TARGETED',suite['name'], 'source='+suite['source_filter'], 'count='+str(suite['count']), 'mode='+suite['mode'])
+        print('Select with --suite NAME or --suite NAME1,NAME2; use --stage all for all canonical suites')
+        return None
 
     output = spec['run'] / 'shared_evaluations' / benchmark_name / _model_slug(model)
     if gate_only:
@@ -145,6 +165,9 @@ def execute(project: str, version: str, run_id: str, benchmark_name: str, *,
            '--prompt', str(spec['prompt']), '--out', str(output)]
     if stage:
         cmd += ['--stage', stage]
+    if suites:
+        for suite in suites:
+            cmd += ['--suite', suite]
     if resume:
         cmd.append('--resume')
     if dry_run:
