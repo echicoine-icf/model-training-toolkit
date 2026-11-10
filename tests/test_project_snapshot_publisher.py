@@ -32,11 +32,23 @@ class ProjectSnapshotTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
+        # Use a deterministic Git policy for this disposable test fixture.
+        # A developer's Windows core.autocrlf setting must not make the
+        # generated source checkout appear dirty or rewrite test receipts.
+        git_config = self.base / 'test_global_gitconfig'
+        git_config.write_text('[core]\n    autocrlf = false\n', encoding='utf-8')
+        git_env = patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(git_config)})
+        git_env.start()
+        self.addCleanup(git_env.stop)
         self.root = self.base / 'source'
         self.root.mkdir()
         git('init', '-b', 'main', cwd=self.root)
         git('config', 'user.email', 'test@example.com', cwd=self.root)
         git('config', 'user.name', 'Tester', cwd=self.root)
+        # Fix fixture Git EOL policy before the initial commit. On Windows,
+        # changing core.autocrlf after committing CRLF working-tree files
+        # otherwise makes unrelated tracked files appear modified.
+        git('config', 'core.autocrlf', 'false', cwd=self.root)
         put(self.root / '.gitignore', 'runs/\nprojects/*/versions/*/data/*.jsonl\n/WORKSPACE_STATE.json\n')
         put(self.root / 'README.md', 'MTT toolkit')
         put(self.root / 'toolkit/cli.py', 'print("cli")\n')
