@@ -297,6 +297,131 @@ def snapshot_to_checkout(files: dict[str, Path], manifest: dict, dest: Path,
     return manifest_rel
 
 
+# Framework source paths are the only paths eligible for a toolkit-only sync.
+# The initial snapshot receipt is immutable, so subsequent framework changes
+# get separate append-only receipts instead of mutating historical provenance.
+TOOLKIT_EXCLUDED_ROOTS = {
+    'projects', 'runs', 'exports', 'registry', 'rebuild_recipes', 'snapshots',
+}
+
+
+def is_toolkit_path(name: str) -> bool:
+    rel = Path(name)
+    return (not rel.is_absolute() and '..' not in rel.parts and len(rel.parts) > 0
+            and rel.parts[0] not in TOOLKIT_EXCLUDED_ROOTS
+            and '.git' not in rel.parts)
+
+
+def collect_toolkit(root: Path) -> tuple[dict[str, Path], str]:
+    source_commit = output('git', 'rev-parse', 'HEAD', cwd=root)
+    dirty = cmd('git', 'status', '--porcelain', '--untracked-files=no', cwd=root, capture=True).stdout
+    if dirty.strip():
+        raise RuntimeError('Tracked MTT files have local modifications. Commit or stash first; refusing ambiguous toolkit sync.')
+    files: dict[str, Path] = {}
+    for rel in git_tracked(root):
+        key = rel.as_posix()
+        if not is_toolkit_path(key):
+            continue
+        src = root / rel
+        if not acceptable(src, relative=rel):
+            continue
+        validate_payload(src, label=key)
+        files[key] = src
+    return files, source_commit
+
+
+def sync_toolkit_to_checkout(files: dict[str, Path], source_commit: str, dest: Path,
+                             *, project: str, version: str, run_id: str) -> Path:
+    # Require a previously published snapshot. Never turn this into an implicit
+    # first-publish operation or invent a V9.2 model receipt.
+    snapshot_dir = Path('snapshots') / project / version / run_id
+    original_receipt = dest / snapshot_dir / 'manifest.json'
+    if not original_receipt.is_file():
+        raise RuntimeError(f'Original snapshot receipt is missing: {snapshot_dir / "manifest.json"}. Publish the project snapshot first.')
+    original_bytes = original_receipt.read_bytes()
+    original = json.loads(original_bytes)
+    if (original.get('format') != 'mtt-project-source-snapshot-v1'
+        or original.get('project') != project or original.get('version') != version
+        or original.get('run_id') != run_id):
+        raise RuntimeError('Destination original snapshot receipt has unexpected format or identity')
+
+    refresh_dir = snapshot_dir / 'toolkit_refreshes'
+    latest_path = dest / refresh_dir / 'latest.json'
+    old_files = {k: v for k, v in original['files'].items() if is_toolkit_path(k)}
+    if latest_path.exists():
+        latest = json.loads(latest_path.read_text(encoding='utf-8'))
+        prior_ref = latest.get('receipt')
+        if not isinstance(prior_ref, str) or prior_ref != (refresh_dir / (latest.get('source_commit', '') + '.json')).as_posix():
+            raise RuntimeError('Invalid toolkit refresh latest pointer')
+        prior_path = dest / prior_ref
+        if not prior_path.is_file() or digest(prior_path) != latest.get('receipt_sha256'):
+            raise RuntimeError('Previous toolkit refresh receipt integrity mismatch')
+        prior = json.loads(prior_path.read_text(encoding='utf-8'))
+        if prior.get('initial_snapshot_sha256') != hashlib.sha256(original_bytes).hexdigest():
+            raise RuntimeError('Toolkit refresh references a different original snapshot')
+        old_files = prior['files']
+
+    desired = {
+        name: {'sha256': digest(src), 'bytes': src.stat().st_size}
+        for name, src in sorted(files.items())
+    }
+    stale = sorted(set(old_files) - set(files))
+
+    # Fail closed on any destination changes since our last recorded sync. This
+    # protects private-repo customizations and historical model assets.
+    for name in sorted(set(old_files) | set(files)):
+        if not is_toolkit_path(name):
+            raise RuntimeError(f'Unsafe toolkit path in receipt: {name}')
+        existing = dest / name
+        if existing.is_symlink():
+            raise RuntimeError(f'Refusing symlink in destination: {name}')
+        expected = old_files.get(name)
+        if expected:
+            if not existing.is_file() or digest(existing) != expected['sha256']:
+                raise RuntimeError(f'Destination toolkit file was changed independently: {name}; refusing overwrite')
+        elif existing.exists() and (not existing.is_file() or digest(existing) != desired[name]['sha256']):
+            raise RuntimeError(f'New toolkit path collides with destination file: {name}')
+
+    for name in stale:
+        (dest / name).unlink()
+        cmd('git', 'rm', '--', name, cwd=dest)
+    for name, src in files.items():
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or digest(target) != desired[name]['sha256']:
+            shutil.copyfile(src, target)
+
+    receipt_rel = refresh_dir / (source_commit + '.json')
+    receipt = {
+        'format': 'mtt-toolkit-refresh-v1',
+        'project': project, 'version': version, 'run_id': run_id,
+        'initial_snapshot_sha256': hashlib.sha256(original_bytes).hexdigest(),
+        'source_commit': source_commit,
+        'files': desired,
+        'removed_toolkit_paths': stale,
+        'model_version_and_benchmarks_unchanged': True,
+    }
+    receipt_path = dest / receipt_rel
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(receipt, indent=2, ensure_ascii=False) + '\n'
+    if receipt_path.exists() and receipt_path.read_text(encoding='utf-8') != payload:
+        raise RuntimeError(f'Existing toolkit refresh receipt differs: {receipt_rel}')
+    receipt_path.write_text(payload, encoding='utf-8')
+
+    latest = {
+        'source_commit': source_commit,
+        'receipt': receipt_rel.as_posix(),
+        'receipt_sha256': digest(receipt_path),
+    }
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.write_text(json.dumps(latest, indent=2) + '\n', encoding='utf-8')
+
+    paths = sorted([*files, receipt_rel.as_posix(), (refresh_dir / 'latest.json').as_posix()])
+    for start in range(0, len(paths), 70):
+        cmd('git', 'add', '-f', '--', *paths[start:start + 70], cwd=dest)
+    return receipt_rel
+
+
 def validate_url(url: str, *, allow_local: bool = False) -> str:
     if allow_local and (url.startswith('file://') or Path(url).exists()):
         return url
@@ -314,22 +439,35 @@ def run(args, *, root: Path = ROOT):
     project = safe_name(args.project, 'project')
     version = safe_name(args.version, 'version')
     run_id = safe_name(args.run, 'run ID', run=True)
-    benchmarks = [safe_name(b, 'benchmark') for b in args.benchmark]
     url = validate_url(args.repo_url, allow_local=getattr(args, 'allow_local_remote', False))
-    files, source_commit = collect(root, project, version, run_id, benchmarks, args.external_eval)
-    manifest = manifest_for(files, project=project, version=version,
-                            run_id=run_id, source_commit=source_commit, benchmarks=benchmarks)
-    nbytes = sum(v['bytes'] for v in manifest['files'].values())
-    print(f'SOURCE: {root}', flush=True)
-    print(f'DESTINATION: {url}', flush=True)
-    print(f'SNAPSHOT: {project}/{version}/{run_id}', flush=True)
-    print(f'SOURCE COMMIT: {source_commit}', flush=True)
-    print(f'BENCHMARKS: {", ".join(benchmarks)}', flush=True)
-    print(f'FILES: {len(files)}, TOTAL: {nbytes / 1024**2:.1f} MiB', flush=True)
-    print('EXCLUDED: model weights, GGUF, checkpoints, caches, .venv, run output, predictions, credentials', flush=True)
-    print('WARNING: Training corpora and benchmark cases will be committed. Check GitHub repository visibility.', flush=True)
+    syncing = getattr(args, 'sync_toolkit', False)
+    if syncing:
+        if args.external_eval or args.benchmark:
+            raise ValueError('--sync-toolkit operates on toolkit code only; omit --benchmark and --external-eval')
+        files, source_commit = collect_toolkit(root)
+        print(f'SOURCE: {root}', flush=True)
+        print(f'DESTINATION: {url}', flush=True)
+        print(f'SYNC TOOLKIT SOURCE: {source_commit} ({len(files)} files)', flush=True)
+        print(f'ORIGINAL SNAPSHOT: {project}/{version}/{run_id} (preserved)', flush=True)
+    else:
+        benchmarks = [safe_name(b, 'benchmark') for b in args.benchmark]
+        files, source_commit = collect(root, project, version, run_id, benchmarks, args.external_eval)
+        manifest = manifest_for(files, project=project, version=version,
+                                run_id=run_id, source_commit=source_commit, benchmarks=benchmarks)
+        nbytes = sum(v['bytes'] for v in manifest['files'].values())
+        print(f'SOURCE: {root}', flush=True)
+        print(f'DESTINATION: {url}', flush=True)
+        print(f'SNAPSHOT: {project}/{version}/{run_id}', flush=True)
+        print(f'SOURCE COMMIT: {source_commit}', flush=True)
+        print(f'BENCHMARKS: {", ".join(benchmarks)}', flush=True)
+        print(f'FILES: {len(files)}, TOTAL: {nbytes / 1024**2:.1f} MiB', flush=True)
+        print('EXCLUDED: model weights, GGUF, checkpoints, caches, .venv, run output, predictions, credentials', flush=True)
+        print('WARNING: Training corpora and benchmark cases will be committed. Check GitHub repository visibility.', flush=True)
     if not args.push:
-        print('DRY RUN ONLY: no clone, commits, or pushes. Use --push --visibility private|public to publish.')
+        if syncing:
+            print('DRY RUN ONLY: toolkit files enumerated; no remote cloned or changed. --push --visibility private|public to sync.')
+        else:
+            print('DRY RUN ONLY: no clone, commits, or pushes. Use --push --visibility private|public to publish.')
         return
     if args.visibility is None:
         raise ValueError('--push requires --visibility private|public (confirm the repository settings in GitHub)')
@@ -343,22 +481,26 @@ def run(args, *, root: Path = ROOT):
             raise RuntimeError(f'Destination default branch is {branch!r}, expected main; refusing to change branches')
         if not branch:
             cmd('git', 'switch', '-c', 'main', cwd=staging)
-        # Honor the source checkout's local/global author configuration without
-        # modifying the user's global Git settings.
         for field in ('user.name', 'user.email'):
             val = output('git', 'config', '--get', field, cwd=root)
             if not val:
                 raise RuntimeError(f'Configure git {field} in the originating checkout first')
             cmd('git', 'config', '--local', field, val, cwd=staging)
-        receipt = snapshot_to_checkout(files, manifest, staging,
-                                       project=project, version=version, run_id=run_id)
+        if syncing:
+            receipt = sync_toolkit_to_checkout(files, source_commit, staging,
+                                              project=project, version=version, run_id=run_id)
+        else:
+            receipt = snapshot_to_checkout(files, manifest, staging,
+                                           project=project, version=version, run_id=run_id)
         change = cmd('git', 'diff', '--cached', '--quiet', cwd=staging, check=False)
         if change.returncode == 0:
-            print('NO CHANGES: destination already has this exact snapshot.')
+            print('NO CHANGES: destination already has this exact toolkit/snapshot state.')
             return
         if change.returncode != 1:
             raise RuntimeError('Git index inspection failed')
-        cmd('git', 'commit', '-m', f'Snapshot {project} {version} run {run_id}', cwd=staging)
+        commit_message = (f'Sync MTT toolkit source {source_commit[:12]}' if syncing
+                          else f'Snapshot {project} {version} run {run_id}')
+        cmd('git', 'commit', '-m', commit_message, cwd=staging)
         cmd('git', 'push', 'origin', 'HEAD:refs/heads/main', cwd=staging)
         print(f'PUBLISHED: {url}  receipt={receipt.as_posix()}')
     print('SOURCE UNCHANGED: Git origin, branch, index, and ignore rules were not touched.')
@@ -370,7 +512,8 @@ def main(argv=None):
     p.add_argument('--project', required=True, help='MTT project (e.g. eli)')
     p.add_argument('--version', required=True, help='Version to preserve (e.g. v9.2)')
     p.add_argument('--run', required=True, help='Completed run ID used to freeze training inputs')
-    p.add_argument('--benchmark', action='append', required=True, help='Project benchmark directory name; repeatable')
+    p.add_argument('--benchmark', action='append', default=[], help='Project benchmark directory name; repeatable (initial snapshot only)')
+    p.add_argument('--sync-toolkit', action='store_true', help='Refresh toolkit source only in previously published repository; preserve V9.2 and benchmark assets')
     p.add_argument('--external-eval', action='append', type=Path, default=[],
                    help='Optional extra evaluation code/data directory; excludes results and caches')
     p.add_argument('--push', action='store_true', help='Clone destination, commit and push main (no force)')
