@@ -330,6 +330,48 @@ def collect_toolkit(root: Path) -> tuple[dict[str, Path], str]:
     return files, source_commit
 
 
+def receipt_publication_commit(dest: Path, receipt_path: Path) -> str:
+    """Find the commit that first published an immutable snapshot/refresh receipt.
+
+    This provides the Git-normalized content baseline for source files. The
+    original snapshot receipt records pre-Git working-tree SHA-256 values,
+    which can differ from Git's committed bytes after Windows CRLF -> LF
+    normalization. We must not mistake that for a destination modification.
+    """
+    relative = receipt_path.relative_to(dest).as_posix()
+    raw = output('git', 'log', '--diff-filter=A', '--format=%H', '--', relative, cwd=dest)
+    revisions = raw.splitlines()
+    if len(revisions) != 1 or not re.fullmatch(r'[0-9a-f]{40,64}', revisions[0]):
+        raise RuntimeError(f'Cannot verify original publication commit for {relative}')
+    return revisions[0]
+
+
+def committed_blob(dest: Path, revision: str, path: str) -> str | None:
+    result = cmd('git', 'rev-parse', '--verify', f'{revision}:{path}',
+                 cwd=dest, capture=True, check=False)
+    if result.returncode:
+        return None
+    blob = result.stdout.decode('ascii', errors='replace').strip()
+    return blob if re.fullmatch(r'[0-9a-f]{40,64}', blob) else None
+
+
+def destination_matches_published_blob(dest: Path, path: str,
+                                       publication_commit: str) -> bool:
+    """Accept EOL-only byte differences, but reject independently changed Git blobs.
+
+    Compare the current HEAD blob against the one Git actually committed when
+    publishing the previous receipt. The clean worktree check also prevents
+    uncommitted filesystem modifications from being treated as safe.
+    """
+    old_blob = committed_blob(dest, publication_commit, path)
+    head_blob = committed_blob(dest, 'HEAD', path)
+    if old_blob is None or head_blob is None or old_blob != head_blob:
+        return False
+    clean = cmd('git', 'diff', '--quiet', 'HEAD', '--', path,
+                cwd=dest, check=False)
+    return clean.returncode == 0
+
+
 def sync_toolkit_to_checkout(files: dict[str, Path], source_commit: str, dest: Path,
                              *, project: str, version: str, run_id: str) -> Path:
     # Require a previously published snapshot. Never turn this into an implicit
@@ -348,6 +390,7 @@ def sync_toolkit_to_checkout(files: dict[str, Path], source_commit: str, dest: P
     refresh_dir = snapshot_dir / 'toolkit_refreshes'
     latest_path = dest / refresh_dir / 'latest.json'
     old_files = {k: v for k, v in original['files'].items() if is_toolkit_path(k)}
+    publication_commit = receipt_publication_commit(dest, original_receipt)
     if latest_path.exists():
         latest = json.loads(latest_path.read_text(encoding='utf-8'))
         prior_ref = latest.get('receipt')
@@ -360,6 +403,7 @@ def sync_toolkit_to_checkout(files: dict[str, Path], source_commit: str, dest: P
         if prior.get('initial_snapshot_sha256') != hashlib.sha256(original_bytes).hexdigest():
             raise RuntimeError('Toolkit refresh references a different original snapshot')
         old_files = prior['files']
+        publication_commit = receipt_publication_commit(dest, prior_path)
 
     desired = {
         name: {'sha256': digest(src), 'bytes': src.stat().st_size}
@@ -377,8 +421,12 @@ def sync_toolkit_to_checkout(files: dict[str, Path], source_commit: str, dest: P
             raise RuntimeError(f'Refusing symlink in destination: {name}')
         expected = old_files.get(name)
         if expected:
-            if not existing.is_file() or digest(existing) != expected['sha256']:
+            if not existing.is_file():
                 raise RuntimeError(f'Destination toolkit file was changed independently: {name}; refusing overwrite')
+            if digest(existing) != expected['sha256']:
+                if not destination_matches_published_blob(dest, name, publication_commit):
+                    raise RuntimeError(f'Destination toolkit file was changed independently: {name}; refusing overwrite')
+                print(f'GIT EOL NORMALIZATION: {name} differs from raw receipt, but the published Git blob is unchanged', flush=True)
         elif existing.exists() and (not existing.is_file() or digest(existing) != desired[name]['sha256']):
             raise RuntimeError(f'New toolkit path collides with destination file: {name}')
 

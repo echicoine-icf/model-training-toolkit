@@ -151,8 +151,12 @@ python scripts/publish_project_snapshot.py \
 ```
 
 This mode updates tracked toolkit source, adds new toolkit files, and removes
-obsolete toolkit files **only when they match the last published hashes**.
-It refuses to overwrite destination-only edits or collide with existing files.
+obsolete toolkit files **only when they match the previous publication**.
+For committed toolkit files, it checks original SHA-256 values and, when the
+working-tree bytes differ because Git normalized Windows CRLF to LF, validates
+the *Git blob* against the commit that published the previous receipt. It still
+rejects independent Git changes to the private repository and refuses new-path
+collisions. It does not relax training, evaluation, or snapshot immutability.
 It never writes to `projects/`, `rebuild_recipes/`, or the original snapshot
 receipt. A new immutable source-refresh receipt is written under:
 

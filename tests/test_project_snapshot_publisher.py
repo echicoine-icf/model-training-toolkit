@@ -3,6 +3,8 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
+from unittest.mock import patch
 import subprocess
 import sys
 import tempfile
@@ -30,11 +32,23 @@ class ProjectSnapshotTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
+        # Use a deterministic Git policy for this disposable test fixture.
+        # A developer's Windows core.autocrlf setting must not make the
+        # generated source checkout appear dirty or rewrite test receipts.
+        git_config = self.base / 'test_global_gitconfig'
+        git_config.write_text('[core]\n    autocrlf = false\n', encoding='utf-8')
+        git_env = patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(git_config)})
+        git_env.start()
+        self.addCleanup(git_env.stop)
         self.root = self.base / 'source'
         self.root.mkdir()
         git('init', '-b', 'main', cwd=self.root)
         git('config', 'user.email', 'test@example.com', cwd=self.root)
         git('config', 'user.name', 'Tester', cwd=self.root)
+        # Fix fixture Git EOL policy before the initial commit. On Windows,
+        # changing core.autocrlf after committing CRLF working-tree files
+        # otherwise makes unrelated tracked files appear modified.
+        git('config', 'core.autocrlf', 'false', cwd=self.root)
         put(self.root / '.gitignore', 'runs/\nprojects/*/versions/*/data/*.jsonl\n/WORKSPACE_STATE.json\n')
         put(self.root / 'README.md', 'MTT toolkit')
         put(self.root / 'toolkit/cli.py', 'print("cli")\n')
@@ -169,6 +183,55 @@ class ProjectSnapshotTests(unittest.TestCase):
         latest=json.loads((after/f'snapshots/eli/v9.2/{self.run_id}/toolkit_refreshes/latest.json').read_text())
         self.assertEqual(latest['source_commit'], git('rev-parse', 'HEAD', cwd=self.root))
         self.assertEqual(git('status','--porcelain',cwd=self.root),'')
+
+    def test_sync_accepts_git_normalized_eol_without_independent_edit(self):
+        # Reproduces Windows source CRLF + destination Git LF normalization.
+        # The initial SHA-256 is of source bytes; the Git repository stores
+        # normalized LF bytes. Neither user nor publisher edited the text.
+        path = self.root / 'INSTALL_v0.3.2.md'
+        git('config', 'core.autocrlf', 'false', cwd=self.root)
+        path.write_bytes(b'installation steps\r\nLine 2\r\n')
+        git('add', path.name, cwd=self.root)
+        git('commit', '-m', 'old Windows install file', cwd=self.root)
+        global_config = self.base / 'global_gitconfig'
+        global_config.write_text('[core]\n    autocrlf = input\n', encoding='utf-8')
+        with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(global_config)}):
+            mod.run(self.args(), root=self.root)
+            dest = self.published_checkout()
+            receipt_path = dest / f'snapshots/eli/v9.2/{self.run_id}/manifest.json'
+            receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+            self.assertNotEqual(receipt['files'][path.name]['sha256'],
+                                mod.digest(dest / path.name))
+            git('rm', path.name, cwd=self.root)
+            git('commit', '-m', 'remove obsolete install file', cwd=self.root)
+            mod.run(self.args(sync_toolkit=True, benchmark=[]), root=self.root)
+            updated = self.base / 'updated_eol'
+            git('clone', self.remote, updated, cwd=self.base)
+            self.assertFalse((updated / path.name).exists())
+            self.assertEqual((updated / receipt_path.relative_to(dest)).read_bytes(),
+                             receipt_path.read_bytes())
+
+    def test_sync_eol_mismatch_still_rejects_real_destination_edit(self):
+        path = self.root / 'INSTALL_v0.3.2.md'
+        git('config', 'core.autocrlf', 'false', cwd=self.root)
+        path.write_bytes(b'installation steps\r\nLine 2\r\n')
+        git('add', path.name, cwd=self.root)
+        git('commit', '-m', 'old Windows install file', cwd=self.root)
+        global_config = self.base / 'global_gitconfig'
+        global_config.write_text('[core]\n    autocrlf = input\n', encoding='utf-8')
+        with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(global_config)}):
+            mod.run(self.args(), root=self.root)
+            clone = self.published_checkout()
+            git('config', 'user.name', 'Other', cwd=clone)
+            git('config', 'user.email', 'other@example.com', cwd=clone)
+            put(clone / path.name, 'Private repository custom edits\n')
+            git('add', path.name, cwd=clone)
+            git('commit', '-m', 'private customization', cwd=clone)
+            git('push', 'origin', 'main', cwd=clone)
+            git('rm', path.name, cwd=self.root)
+            git('commit', '-m', 'remove obsolete install file', cwd=self.root)
+            with self.assertRaisesRegex(RuntimeError, 'changed independently'):
+                mod.run(self.args(sync_toolkit=True, benchmark=[]), root=self.root)
 
     def test_sync_toolkit_is_idempotent(self):
         mod.run(self.args(), root=self.root)
