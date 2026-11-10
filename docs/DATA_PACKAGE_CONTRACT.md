@@ -1,22 +1,19 @@
-# Model Training Toolkit — Data Package Contract (mtt-data-v1)
+# Data package contract (`mtt-data-v1`)
 
-**This is the authoritative interface for future training packages.**
+A project author supplies the examples, expected assistant responses, and system prompt. The toolkit validates inputs and handles training. The **application** owns the meaning of a correct output.
 
-A model author supplies the data package; the toolkit owns the training and evaluation engines. For ELI v9.0, the author should create a ZIP with this relative layout:
+## Files
 
 ```text
-v9.0/
-└── data/
-    ├── package.json          # REQUIRED, package format and behavior
-    ├── train.jsonl           # REQUIRED, approved training cases
-    ├── system_prompt.txt     # REQUIRED, exact training + inference system message
-    ├── eval.jsonl            # Required if you elect automatic/manual evaluation
-    └── schema.json           # Optional unless package.json uses append_schema
+projects/<project>/versions/<version>/data/
+  package.json         # required
+  train.jsonl          # required
+  system_prompt.txt    # required
+  eval.jsonl           # optional unless required by your evaluation workflow
+  schema.json          # optional unless append_schema is selected
 ```
 
-**Destination:** extract `v9.0/data/` into `model-training-toolkit/projects/eli/versions/`. You may extract before *or* after creating the version. Never extract a new ZIP over a frozen run snapshot. New revisions require a new named version or explicitly managed new run.
-
-## package.json
+`package.json` example:
 
 ```json
 {
@@ -28,56 +25,42 @@ v9.0/
     "system_prompt": "system_prompt.txt",
     "schema": "schema.json"
   },
-  "required": {
-    "train": true,
-    "system_prompt": true,
-    "eval": false,
-    "schema": false
-  },
+  "required": {"train": true, "system_prompt": true, "eval": false, "schema": false},
   "prompt_assembly": "prompt_only",
-  "evaluation": {
-    "scorer": "exact_json",
-    "max_new_tokens": 384
-  },
-  "description": "Describe the task and the training corpus."
+  "evaluation": {"scorer": "exact_json", "max_new_tokens": 384},
+  "description": "Describe the task, labels and data provenance."
 }
 ```
 
-`prompt_assembly` is **critical**:
-- `prompt_only`: use exactly `system_prompt.txt` as the system message. If it includes the schema, do **not** append another copy.
-- `append_schema`: append `\n\nSchema:\n` followed by the complete `schema.json` file. Set `required.schema=true`. Always check that resulting prompt matches what the intended model learned.
+`prompt_assembly` must match training and inference: `prompt_only` uses the system prompt as-is; `append_schema` appends the schema and requires `schema.json`. Do not embed the schema twice.
 
-The manifest's `required.eval` may be false so training can proceed without evaluation. Selecting auto-evaluation requires a populated `eval.jsonl`, regardless of this flag. Declaring true requires eval during ordinary validation.
+## JSONL example
 
-## train.jsonl and eval.jsonl
-
-Both are UTF-8 JSON Lines: **one JSON object per line**, each with `id`, nonempty `question`, and `expected`. `expected` can be a JSON object, JSON array or string. Extra descriptive metadata is allowed; it is not passed to the model. Do not insert an already-rendered chat prompt into `question`.
+Each row is a separate UTF-8 JSON object with a unique `id`, nonblank `question`, and `expected` (JSON object, list or string):
 
 ```jsonl
-{"id":"train_0001","question":"Find datasets about asthma.","expected":{"target":"Dataset","conditions":[{"field":"dataset.subject.label","operator":"equals","value":"asthma","id":"condition1"}],"related":[],"relationshipGraph":null,"conditionBindings":[]}}
-{"id":"train_0002","question":"Find datasets about stroke.","expected":{"target":"Dataset","conditions":[{"field":"dataset.subject.label","operator":"equals","value":"stroke","id":"condition1"}],"related":[],"relationshipGraph":null,"conditionBindings":[]}}
+{"id":"train_001","question":"Add buying groceries to my list.","expected":{"title":"Buy groceries","priority":"medium","due_date":null}}
+{"id":"train_002","question":"Make the report urgent.","expected":{"title":"Complete report","priority":"high","due_date":null}}
 ```
 
-Store the evaluation questions in **eval.jsonl**, not train.jsonl. Repeating an identical normalized question between splits fails validation. Exact-match scoring is order-sensitive for arrays, including DATMM condition lists; ELI will eventually need its own semantic validator as a separately versioned evaluator.
+These examples are illustrative. Your schema may require additional fields. `question` is the user's request, not a pre-rendered chat template. A dataset can also supply approved chat messages; the trainer masks system and user tokens from the assistant-response loss when that format is used. Keep evaluation examples separate from training and avoid duplicate normalized questions across splits.
 
-## Required version package behavior
+## Validation and freezing
 
-1. `version create` registers the version without asking for data paths or hyperparameters.
-2. `data inspect` checks the package's required inputs.
-3. `train` checks the package **before** any training parameters. If inputs are missing, it offers to import prepared files (never generates invented gold data).
-4. Training requires explicit per-run model selection, epochs, max sequence tokens, learning rate, accumulation, seed, optimizer/LoRA settings and auto-evaluation decision.
-5. A run **freezes every file** under `data/` plus `version.json` with SHA-256. `main` is resolved to a concrete Hugging Face commit SHA in the frozen run.
-6. The trainer starts from the selected fresh base model, never silently layers adapters.
-7. Evaluate only a successfully trained run with an adapter (or an explicitly requested `--base-only` baseline). A missing eval dataset prevents automatic evaluation from starting.
-8. The engine reports per-run results, versions and frozen files in the generated `PROJECT_HANDOFF.md`.
+```bash
+bash workspace.sh data inspect PROJECT VERSION
+bash workspace.sh data validate PROJECT VERSION --require-eval
+```
 
-## Current supported capabilities and limits
+`--require-eval` is appropriate when that evaluation input is needed; otherwise a data package can be validated for training without a local eval file. Training freezes version data, settings and model revision under a distinct `runs/` directory with hashes. It does not rewrite a completed run's inputs or invent labels.
 
-- Model family: Hugging Face causal language models compatible with Transformers + PEFT LoRA, NVIDIA CUDA for training.
-- Evaluation scorer: `exact_json` only, not semantic equivalence. ELI's graph/condition-binding contract scorer is **not part of v0.3.0**.
-- Not implemented: QLoRA, distributed training, arbitrary model architecture compatibility, robust VRAM prediction, resume optimizer checkpoints, artifact uploads to S3, non-CUDA training.
-- Virtualenv isolation applies to Python dependencies installed by the toolkit, not NVIDIA GPU drivers or external Git executables.
+## Scoring boundaries
 
-## Copy/paste handoff for the ELI data-authoring conversation
+- The built-in `exact_json` scorer is a basic structural/value comparison, not domain-aware semantic equivalence.
+- Custom Python scorers can implement project-defined matching rules and diagnose malformed model outputs; see [Custom evaluation runners](CUSTOM_EVALUATION_RUNNERS.md).
+- Shared benchmark packages are project-level assets with independent package versions, frozen cases and hashes; see [Shared evaluations](SHARED_EVALUATIONS.md).
+- **Training recall** on known examples and **blind generalization** on held-out examples are different metrics. Do not combine them into one accuracy claim.
 
-> Please create an ELI v9.0 **data package only**, with ZIP-relative paths `v9.0/data/package.json`, `train.jsonl`, `system_prompt.txt`, `eval.jsonl`, and `schema.json` if needed. Follow `docs/DATA_PACKAGE_CONTRACT.md` (mtt-data-v1). Each JSONL row needs `id`, `question`, and `expected`. Preserve approved historical semantics, explicitly identify compiler-unsupported cases, and keep evaluation questions separate. Set `prompt_assembly=prompt_only` when the system prompt already embeds the schema. The toolkit handles model selection, hyperparameters, training and output packaging; do not include new trainer scripts. Provide hashes, corpus counts, label provenance and a concise README inside the data folder.
+## Author checklist
+
+Document your application's schema/contract; example counts and provenance; how relative dates and missing optional values are handled; holdout definitions; prompt/schema hashes; expected response format; known ambiguities; and the intended evaluator. The toolkit's data contract describes packaging, not application semantics.

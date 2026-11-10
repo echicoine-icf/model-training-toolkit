@@ -1,15 +1,39 @@
-# Architecture — v0.3.5
+# Architecture
 
-**Installer** `run_me_first.sh` → stdlib `scripts/bootstrap.py` → isolated `.venv` and pinned llama.cpp source.
+MTT separates reusable infrastructure from project-specific **training and evaluation contracts**.
 
-**Workspace CLI** `workspace.sh` → `.venv` Python `toolkit/cli.py` → `project create` / `version create` / `data inspect` / `train` / `evaluate` / `export` / `handoff`.
+## Components
 
-**Version data** `projects/<project>/versions/<version>/data/` is a stable content contract, independent from any one training experiment or ChatGPT conversation.
+| Path | Responsibility |
+|---|---|
+| `toolkit/cli.py` and `workspace.sh` | CLI, project/version/run lifecycle, evaluation and export commands |
+| `toolkit/data_package.py` | Validate and freeze version data packages |
+| `toolkit/train_engine.py` and `toolkit/backends.py` | Common supervised fine-tuning loop, LoRA setup and optional backend loading |
+| `toolkit/checkpoints.py` | Atomic resumable checkpoints with optimizer, model and RNG state |
+| `toolkit/eval_engine.py`, `toolkit/evaluation_plugins.py` | Built-in and custom evaluation execution |
+| `toolkit/shared_eval.py` | Project-level benchmark discovery, integrity audit and delegated inference |
+| `toolkit/workspace_state.py` | Read-only diagnostics and explicit repair of local workspace state |
+| `scripts/publish_project_snapshot.py` | Publish source, version inputs and frozen run recipe into a separate Git repository |
+| `projects/<project>/versions/<version>/data/` | Authored inputs, not toolkit code |
+| `runs/<project>/<version>/<run-id>/` | Frozen inputs, checkpoints, model adapters and provenance |
 
-**Run lifecycle** version inputs validate → model & hyperparameters reviewed → Hugging Face base commit resolved → configuration and all version data frozen with SHA-256 → fresh LoRA training → adapter saved → optional evaluation → registry and handoff.
+## Lifecycle
 
-**Canonical evaluation** exact JSON only until task-specific semantic scorer modules are added. Do not interpret successful JSON parsing or exact equality as semantic correctness for unordered conditions/graph bindings.
+1. Select a base model and immutable revision for a project version.
+2. Author `mtt-data-v1` training examples and an application output contract.
+3. Validate data and holdout separation.
+4. Review model/LoRA/optimizer settings; freeze data, prompt and configuration at run creation.
+5. Train from the selected base using assistant-only loss and save resumable checkpoints.
+6. Export adapter/merged model as needed for the serving environment.
+7. Measure **training recall** separately from **independent generalization** and targeted regression suites.
+8. Record evaluator version, data hashes, model identity, prompt and decoding settings with each evaluation.
 
-**Storage** `.venv`, downloaded models, llama.cpp source tree, actual training runs and caches are local and never included in a distributable source ZIP.
+## State and safety boundaries
 
-**Training backends (v0.3.5):** `toolkit/backends.py` handles opt-in Unsloth initialization; `toolkit/train_engine.py` retains the shared token masking, PyTorch optimizer/gradient loop, scheduling, and PEFT audit. `--backend pytorch` requires no Unsloth import. `--backend unsloth` imports Unsloth before Torch/Transformers and loads the exact pinned model in full precision, then verifies the wrapped PEFT modules. Experimental GPU compatibility and performance must be measured on the target hardware before deployment.
+- `WORKSPACE_STATE.json`, `.venv`, `runs/`, caches, model weights and downloaded llama.cpp source are machine-local; never publish as framework source.
+- The optional project snapshot publisher explicitly exports selected training and benchmark data to a separate destination, but excludes weights. Inspect licensing and privacy before publishing.
+- Evaluation code is supplied by the project and **trusted**; MTT doesn't sandbox it.
+- A project benchmark's package version, dataset hashes and semantic scorer identity must agree before comparing model scores. Adding cases means a new benchmark package release.
+- The built-in exact-JSON scorer is not equivalent to a project's semantic evaluator or compiler integration.
+
+See [Data package](DATA_PACKAGE_CONTRACT.md), [Custom evaluation](CUSTOM_EVALUATION_RUNNERS.md), [Shared benchmarks](SHARED_EVALUATIONS.md), and [Checkpoints](RESUMABLE_CHECKPOINTS.md).
