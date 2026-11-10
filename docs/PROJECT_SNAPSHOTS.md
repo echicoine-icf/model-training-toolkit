@@ -1,174 +1,67 @@
-# Publish a reproducible project snapshot to a separate Git repository
+# Publishing reproducible project snapshots
 
-The `scripts/publish_project_snapshot.py` utility creates a standalone **source and
-training-input** snapshot in another Git repository. It leaves the operational
-MTT checkout, its `origin`, its `.gitignore`, its branch/index, its weights, and
-its runs unchanged. You can continue pulling framework updates from the
-original MTT project afterward.
+`python scripts/publish_project_snapshot.py` copies the **current committed MTT framework source** plus explicitly selected project/version data into a **separate Git repository**. It uses a temporary checkout, not a change to your operational repository's `origin`, `.gitignore`, branch or index.
 
-It does **not** create a GitHub repository: create a blank repository first. Set
-it to **private** if training questions, patient-related examples, or evaluation
-materials have any distribution restrictions. Review data licensing and the
-contents before publishing; the tool checks common credential signatures but
-is not a comprehensive security scanner. Confirm repository visibility on GitHub.
+This is for reconstructing a training run from its inputs and recipe. It is **not** a backup of a trained model's weights.
 
-## What is exported
+## Published assets
 
-- MTT code, configuration, requirements, CLI, utilities, tests, and docs from
-  the current clean Git checkout.
-- `projects/PROJECT/project.json` and `project.sh` when present, plus
-  `projects/PROJECT/versions/VERSION/` including ignored `data/*.jsonl`.
-- Explicitly selected versioned benchmarks under
-  `projects/PROJECT/evaluations/BENCHMARK/` (including ignored files).
-- The **selected run's frozen `input/`**, with `input_hashes.json`, under
-  `rebuild_recipes/PROJECT/VERSION/RUN/input/`, plus `run.json` and
-  `training_plan.json` if available. Frozen hashes must all validate before
-  publication. Use its `version.json` when reproducing the exact run settings.
-- Optional extra evaluation definitions/cases from `--external-eval DIRECTORY`,
-  stored under `projects/PROJECT/evaluations/external/NAME/`. Prediction logs and
-  the evaluator's `ollama_results/` are excluded.
-- A per-run SHA-256 snapshot receipt at
-  `snapshots/PROJECT/VERSION/RUN/manifest.json`, with selected benchmark names,
-  source commit, Python/OS and installed ML package versions, file sizes and digests.
+- Toolkit source and tests from a clean, committed checkout.
+- Selected project's version configuration and authored training/evaluation data (including intentionally ignored JSONL datasets).
+- Selected project benchmark releases.
+- Chosen completed run's immutable frozen input snapshot and training recipe.
+- Optional external evaluation source/cases (not prediction output).
+- SHA-256 snapshot receipt recording source commit, copied file hashes, project/version/run and environment details.
 
-Excluded by design: `.venv`, package caches, secrets/credentials, live
-workspace state, `runs/` model weights and optimizer checkpoints, merged models,
-GGUF, evaluation predictions, and other versions/projects. No GPU dependencies
-are reinstalled on the originating machine.
+Excluded: weights, adapters, GGUF, checkpoints, `.venv`, caches, credential files, `WORKSPACE_STATE.json`, prediction logs, and unrelated projects/versions. Back up weights to separate secure artifact storage if you need to **use the already-trained model** rather than retrain it.
 
-A rebuild downloads the pinned pretrained base model and retrains; it will not
-necessarily reproduce bit-identical weights or exactly the same scores across
-hardware/library versions. `requirements/` and the run recipe document the
-training environment; include a `pip freeze`/CUDA details separately if exact
-environment recreation is critical, after screening for sensitive paths.
+Publishing training prompts or evaluations may expose protected data. **Confirm rights and destination repository visibility before pushing**. The publisher's visibility flag is an acknowledgement; it does not verify remote GitHub settings.
 
-## Usage — ELI V9.2 example (Git Bash on Windows)
+## Publish a new project snapshot
 
-From the **operational** MTT workspace after installing this script through a
-source-code PR:
+Create an **empty destination Git repository** first. From your operational MTT checkout, with a completed run and a clean source Git state:
 
 ```bash
-cd ~/model-training-toolkit
-source .venv/Scripts/activate
-
-REPO=https://github.com/echicoine-icf/datmm-model-training-toolkit.git
-RUN=run_20261109T002925408171Z_a4a5de
-EVAL="$HOME/Downloads/ELI_V92_MTT_CUSTOM_EVALUATION_CORRECTED"
-
-# Read-only preview; checks frozen run hashes and enumerates included files.
 python scripts/publish_project_snapshot.py \
-  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
-  --benchmark benchmark-v1.0.2 --external-eval "$EVAL"
+  --repo-url 'https://github.com/OWNER/PROJECT-SNAPSHOT.git' \
+  --project PROJECT --version VERSION --run RUN_ID \
+  --benchmark BENCHMARK_RELEASE
 
-# After reviewing the preview and checking GitHub repository privacy:
+# After checking the preview and confirming the destination is private:
 python scripts/publish_project_snapshot.py \
-  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
-  --benchmark benchmark-v1.0.2 --external-eval "$EVAL" \
+  --repo-url 'https://github.com/OWNER/PROJECT-SNAPSHOT.git' \
+  --project PROJECT --version VERSION --run RUN_ID \
+  --benchmark BENCHMARK_RELEASE \
   --push --visibility private
 ```
 
-If the target is **public**, you must explicitly pass `--visibility public
---allow-public`. The visibility flag is an acknowledgement, not a remote
-verification; confirm actual GitHub settings yourself.
+`--benchmark` can be repeated. If external evaluator definitions are needed, supply `--external-eval PATH` for the same path in both commands. The exporter does not automatically include all local evaluation results or every dataset it finds on disk.
 
-`--benchmark` can be repeated to include multiple benchmark releases. The
-selected benchmark must already exist at
-`projects/eli/evaluations/benchmark-v1.0.2/`. If the corrected external evaluator
-is not installed or you don't need to preserve it, omit `--external-eval` from
-**both** commands. Source weights/checkpoints are never exported.
+For a public destination, the publisher requires explicit `--visibility public --allow-public`; first review the data and its distribution restrictions. No operation force-pushes Git.
 
-A remote GitHub repository with no commits is supported. An existing GitHub
-repository is cloned, then updated without force-pushing. Already published
-version inputs, benchmark files and run recipes cannot be silently changed:
-publish an additional version instead. The script will stop on source code
-changes not committed in the originating MTT working tree.
+## Update toolkit source in an existing snapshot repository
 
-## Recovering on a different PC
+Once a project snapshot exists, use **`--sync-toolkit`** to refresh *framework source only*, leaving frozen training inputs, benchmarks and the original receipt unchanged:
 
 ```bash
-git clone https://github.com/echicoine-icf/datmm-model-training-toolkit.git
-cd datmm-model-training-toolkit
-bash run_me_first.sh --install-ml
-bash workspace.sh doctor
-```
-
-Review the selected `rebuild_recipes/eli/v9.2/RUN/input/version.json` (including
-pinned Qwen model revision, optimizer/training settings) and
-`training_plan.json` before retraining. The `projects/eli/versions/v9.2/`
-package contains the original training data and evaluation inputs. Compare
-against the frozen snapshot if the live version changed; prefer the frozen
-snapshot as the authoritative recipe. Reapply run-specific training overrides.
-Verify shared benchmark hashes with `shared-eval --audit-only` after restoring
-the required benchmark. Train with the appropriate `projects/eli/project.sh
-train v9.2` flags or guided workflow. Training a new run never overwrites the
-archived inputs.
-
-For a full **trained model** backup in addition to reproducible inputs, separately
-archive the adapter, checkpoint and GGUF/SafeTensors outputs to secure artifact
-storage (e.g. private S3). They are intentionally excluded from ordinary Git.
-
-## Safety and failure modes
-
-- The exporter neither modifies Git remotes nor runs `git checkout`, `git
-  reset`, or `git push --force` in the source checkout. A temporary clone does
-  all staging and pushing; failures leave the source intact.
-- GitHub's ordinary Git object size limit applies. Files over 90 MiB fail
-  preflight rather than relying on GitHub to reject them late.
-- Files containing obvious credentials fail preflight; `.env`, `*.pem`, key
-  files, caches, weights and locally generated results are excluded.
-- New snapshots are additive. Changes to already-published version data,
-  benchmarks or frozen run recipes are refused. Pushes are not forced; if the
-  remote advanced while exporting, rerun against its updated state.
-- The snapshot is a source/data repository, not a copy of the originating
-  repository's entire Git history. The source commit SHA is recorded.
-
-## Refreshing MTT code in a repository that already has a model snapshot
-
-The initial snapshot is **immutable**. Running the original publisher with the
-same `--run` after the MTT source commit changes would fail because its
-`manifest.json` records the original source commit and file hashes. It also
-would not remove deleted toolkit files from the destination.
-
-Use **`--sync-toolkit`** for framework-only updates instead. First merge and pull
-any source changes you want to publish (for example, removing obsolete
-`INSTALL_*.md` handoff documents from the MTT main branch). Then, from the
-original operational MTT checkout:
-
-```bash
-cd ~/model-training-toolkit
-REPO=https://github.com/echicoine-icf/datmm-model-training-toolkit.git
-RUN=run_20261109T002925408171Z_a4a5de
-
-# Local dry run: lists source files without contacting/changing the destination.
 python scripts/publish_project_snapshot.py \
-  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
+  --repo-url 'https://github.com/OWNER/PROJECT-SNAPSHOT.git' \
+  --project PROJECT --version VERSION --run RUN_ID \
   --sync-toolkit
 
-# Sync only the latest committed toolkit source (no model/data modifications).
 python scripts/publish_project_snapshot.py \
-  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
+  --repo-url 'https://github.com/OWNER/PROJECT-SNAPSHOT.git' \
+  --project PROJECT --version VERSION --run RUN_ID \
   --sync-toolkit --push --visibility private
 ```
 
-This mode updates tracked toolkit source, adds new toolkit files, and removes
-obsolete toolkit files **only when they match the previous publication**.
-For committed toolkit files, it checks original SHA-256 values and, when the
-working-tree bytes differ because Git normalized Windows CRLF to LF, validates
-the *Git blob* against the commit that published the previous receipt. It still
-rejects independent Git changes to the private repository and refuses new-path
-collisions. It does not relax training, evaluation, or snapshot immutability.
-It never writes to `projects/`, `rebuild_recipes/`, or the original snapshot
-receipt. A new immutable source-refresh receipt is written under:
+The publisher compares source/destination Git contents and records a distinct toolkit refresh receipt. It guards against overwriting independent remote changes and accounts for Git's CRLF/LF normalization on Windows. It cannot change previously published training inputs. The source must first be committed and merged/pulled into the originating workspace.
 
-`snaps​hots/PROJECT/VERSION/RUN/toolkit_refreshes/SOURCE_COMMIT.json`
+## Rebuild on another machine
 
-and `toolkit_refreshes/latest.json` points at the most recent receipt. The
-original model snapshot receipt remains as a historical record. Ordinary
-GitHub pulls in the *operational* source checkout continue to use their usual
-`origin` remote; publishing uses a separate temporary clone.
+1. Clone the snapshot repository and initialize MTT with the installation instructions in its README.
+2. Review the frozen `rebuild_recipes/PROJECT/VERSION/RUN_ID/input/`, `training_plan.json` and model revision before starting training.
+3. Validate package data and required holdout/benchmark SHA-256 hashes.
+4. Supply compatible GPU dependencies and training flags as recorded in the run recipe. A new training run does not restore identical optimizer state or promise identical weights across environments.
 
-The target must already contain a snapshot published using the original
-publisher. If it is still empty, use the standard initial publish command
-(including `--benchmark`) first, and then use `--sync-toolkit` for subsequent
-framework updates. The tool does not change repository visibility; you must
-confirm privacy in GitHub before publishing training data.
+Do not overwrite an existing frozen run snapshot or change benchmark datasets in place. New benchmark lessons belong in a new benchmark package version.

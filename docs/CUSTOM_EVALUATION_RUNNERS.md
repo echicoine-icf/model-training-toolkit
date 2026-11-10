@@ -1,10 +1,10 @@
-# Custom Evaluation Runners — MTT v0.3.7
+# Custom evaluation runners
 
 This is an **additive** feature. Without an evaluation registry, MTT's historical exact-JSON evaluator and training/checkpoint behavior are unchanged. Custom evaluation uses trusted project Python scripts; it does **not** sandbox arbitrary code.
 
 ## Configuration: `mtt-eval-runners-v1`
 
-Put `evaluation/runners.json` and Python scripts in a version's `data/` folder **before training**, or build an external evaluation package in a separate directory to attach after a run completes. This second option is necessary for existing V9.2 runs whose frozen training snapshots cannot be modified.
+Put `evaluation/runners.json` and Python scripts in a version's `data/` folder **before training**, or build an external evaluation package in a separate directory to attach after a run completes. This second option is useful when attaching an evaluator to an existing completed run whose frozen training snapshot must not change.
 
 ```text
 projects/<project>/versions/<version>/data/
@@ -50,7 +50,7 @@ Example `evaluation/runners.json`:
 
 Set optional `expected_count` on any suite and optional top-level `data_sha256` mapping of relative file paths to expected SHA-256. If specified, mismatches stop evaluation before inference. The runner's `datasets` list is checked at registry discovery, as are scripts, requested model types, supported stages, names and file paths.
 
-Stage names and order are project-defined. `--suite NAME` executes stages **through** NAME, preserving baseline-first ordering. `--suite all` executes the complete sequence. `--runner NAME` restricts execution to one registered runner; `--runner custom` means all registered runners.
+Stage names and order are project-defined. For this **custom `evaluate` command**, `--suite NAME` executes stages **through** NAME, preserving baseline-first ordering. This is distinct from `shared-eval --suite`, which selects named individual suites. `--suite all` executes the complete sequence. `--runner NAME` restricts execution to one registered runner; `--runner custom` means all registered runners.
 
 ## Scorer subprocess contract
 
@@ -89,9 +89,9 @@ bash projects/PROJECT/project.sh evaluate VERSION --run RUN_ID --runner custom -
 
 # For an already-trained run whose original snapshot lacks the registry:
 bash projects/PROJECT/project.sh evaluate VERSION --run RUN_ID \
-  --runner custom --suite baseline --eval-package "$HOME/Downloads/project-eval" --dry-run
+  --runner custom --suite baseline --eval-package /path/to/project-evaluation-package --dry-run
 bash projects/PROJECT/project.sh evaluate VERSION --run RUN_ID \
-  --runner custom --suite baseline --eval-package "$HOME/Downloads/project-eval"
+  --runner custom --suite baseline --eval-package /path/to/project-evaluation-package
 bash projects/PROJECT/project.sh evaluate VERSION --run RUN_ID \
   --runner custom --suite all --resume
 ```
@@ -114,4 +114,4 @@ Each evaluation identity has its own `runs/.../evaluations_custom/<fingerprint>/
 
 ## Related files
 
-The separately distributed ELI V9.2 reference example uses this same generic interface, but ELI gold scoring is **not shipped in the public MTT source patch**. Do not publish private project evaluation datasets, prompts, or unreviewed model outputs when merging MTT code.
+Project-specific semantic scorers and their test datasets are not included in MTT core. Review evaluator licensing, trusted Python execution, and data privacy before publishing.

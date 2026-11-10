@@ -1,247 +1,134 @@
-# Model Training Toolkit v0.4.0
+# Model Training Toolkit (MTT)
 
-An isolated, repeatable **version-package-driven** workspace for supervised LoRA fine-tuning and evaluation. Share this full ZIP with another developer; they can initialize in any directory without using `datmm-model`.
+A reusable, project-based toolkit for **supervised fine-tuning of task-specific language-model assistants**. MTT standardizes training inputs, LoRA configuration, checkpoints, exports, and evaluations so a model can be developed and compared across iterations without rebuilding the workflow each time.
 
-## Install (Windows Git Bash; Python 3.11+)
+MTT trains compatible causal instruction models to follow an **application-defined response contract**, such as natural language in and structured JSON out. It does not decide the semantics of your application: your project provides the examples, labels, system prompt, and (when needed) semantic evaluator.
 
-Extract the complete release archive so that `run_me_first.sh` is in the `model-training-toolkit` directory:
+## What it does
+
+- **Prepare and validate** versioned datasets (`mtt-data-v1`) with prompt, expected assistant answer, and optional schema.
+- **Fine-tune** from a selected Hugging Face base with PEFT LoRA using the PyTorch backend or the optional Unsloth backend. Assistant-only loss masking trains on assistant responses while retaining system/user context.
+- **Freeze every run**: source model revision, dataset and prompt hashes, training settings, adapter, and run metadata.
+- **Resume training** from verified checkpoints containing optimizer and RNG state; keep a configurable number of checkpoints.
+- **Export** a trained adapter into a merged Hugging Face model and use supported export tooling for GGUF workflows.
+- **Evaluate** training recall and unseen cases, with built-in exact-JSON evaluation, project-defined semantic scorers, or a project-level, versioned shared benchmark.
+- **Publish reproducible project snapshots** to a separate repository, explicitly including selected training inputs and benchmarks while excluding weights and local runtime artifacts.
+
+## Quick start
+
+Prerequisites: Python 3.11+, Git, and sufficient disk space. CUDA training additionally requires a compatible NVIDIA GPU and driver. Examples below use Windows Git Bash.
 
 ```bash
-cd ~/model-training-toolkit
+# From a new checkout of this repository
 bash run_me_first.sh
 source ./activate.sh
 bash workspace.sh doctor
-```
 
-This creates `.venv` and clones a pinned llama.cpp source tree. GPU training packages are **not** installed by default:
-
-```bash
+# Opt in to ML dependencies only when training is required
 bash run_me_first.sh --install-ml
 bash workspace.sh doctor
 ```
 
-To upgrade an existing workspace, copy distribution files from the full archive **without overwriting** `WORKSPACE_STATE.json`, `.venv`, `projects/`, `runs/`, `tools/llama.cpp`, or registry data. See [INSTALL_v0.3.3.md](INSTALL_v0.3.3.md) for the Git-based source-to-operational update workflow. Then:
+**Existing workspace?** Do not rerun initialization or replace `.venv`, `projects/`, `runs/`, or downloaded model files. Pull approved source changes and run:
 
 ```bash
+git pull --ff-only
 bash workspace.sh upgrade
 bash workspace.sh doctor
 ```
 
-Legacy project prompt/schema files are copied non-destructively to the new version-data layout when `upgrade` runs. Existing frozen run snapshots are never rewritten; evaluate older runs with the matching historical toolkit implementation.
+`doctor` is read-only; `doctor --repair` repairs validated machine-local workspace metadata without reinstalling dependencies. See [Workspace health](docs/WORKSPACE_HEALTH.md).
 
-## New project and version
-
-```bash
-bash workspace.sh project create eli
-bash projects/eli/project.sh new-version v9.0
-```
-
-Version creation **requires selecting the base model and Hugging Face revision**. It does **not** ask for paths, prompts, epochs, or tokens. The training wizard confirms the selected model but does not allow swapping it.
-
-A contributor can send a ZIP containing `v9.0/data/` (see **[DATA_PACKAGE_CONTRACT.md](docs/DATA_PACKAGE_CONTRACT.md)**). Extract its contents to `projects/eli/versions/` and then:
+## Project workflow
 
 ```bash
-bash workspace.sh data inspect eli v9.0
-bash workspace.sh dataset validate eli v9.0
-bash projects/eli/project.sh train v9.0
+# Create a project; select its model at version creation
+bash workspace.sh project create example
+bash workspace.sh version create example v1 \
+  --model Qwen/Qwen2.5-0.5B-Instruct --revision main
+
+# Supply a validated data package in projects/example/versions/v1/data/
+bash workspace.sh data inspect example v1
+bash workspace.sh data validate example v1 --require-eval
+
+# Interactive training (a fully specified noninteractive CLI is also supported)
+bash projects/example/project.sh train v1
+
+# Inspect and manage completed runs
+bash workspace.sh runs --project example
+bash workspace.sh status example
 ```
 
-When required data is missing, `train` offers an import wizard before the run configuration questions. The training wizard requires explicit review and entry of every hyperparameter and asks whether to evaluate automatically after a successful training run. When you select `main` for the Hugging Face revision during version creation, the toolkit attempts to resolve its immutable commit SHA before training.
+`main` is a moving Hugging Face revision; the training run resolves an exact base revision when possible. Prefer a pinned commit for repeatable training. Training requires explicit configuration review, including learning rate, epochs, LoRA targets, precision, and evaluation choice. A model may be evaluated only after the corresponding training run has finished.
 
-```bash
-bash projects/eli/project.sh evaluate v9.0   # Only after a trained adapter exists
-bash workspace.sh status eli
-bash workspace.sh runs --project eli
-bash workspace.sh handoff eli
-```
+## Data and application contract
 
-The handoff document is at `projects/eli/PROJECT_HANDOFF.md`. Upload it with the data contract when starting a new ChatGPT conversation.
-
-## Version layout
+A typical `data/` directory contains:
 
 ```text
-model-training-toolkit/
-├── .venv/                 # created locally; never distribute
-├── run_me_first.sh
-├── activate.sh
-├── workspace.sh
-├── toolkit/               # stable engine
-├── docs/DATA_PACKAGE_CONTRACT.md
-├── tools/llama.cpp/       # pinned source; created at setup
-├── projects/eli/
-│   ├── project.sh
-│   ├── PROJECT_HANDOFF.md  # generated on request
-│   └── versions/v9.0/
-│       ├── version.json
-│       └── data/
-│           ├── package.json
-│           ├── train.jsonl
-│           ├── system_prompt.txt
-│           ├── eval.jsonl
-│           └── schema.json
-├── runs/eli/v9.0/<run-id>/
-│   ├── input/             # frozen data and config, SHA-256 manifest
-│   ├── adapter/           # produced by successful LoRA training
-│   ├── evaluation/        # optional, exact JSON scorer
-│   ├── run.json
-│   └── training_progress.jsonl
-└── registry/runs.jsonl
+projects/example/versions/v1/data/
+├── package.json         # mtt-data-v1 contract and prompt assembly
+├── system_prompt.txt    # assistant instructions
+├── train.jsonl          # labeled training prompts
+├── eval.jsonl           # independent labeled evaluation prompts (optional)
+└── schema.json          # optional output contract/schema
 ```
 
-## Project-supplied evaluation runners (v0.3.7)
+Each JSONL line contains an `id`, `question`, and `expected` response:
 
-In addition to the built-in exact-JSON evaluator, a project can register scripts and
-ordered evaluation stages in `data/evaluation/runners.json`. Complete evaluation
-runs can be resumed without regenerating predictions. Existing training snapshots
-can instead attach an external immutable evaluation package with `--eval-package`.
+```json
+{"id":"train_001","question":"Put buying groceries on my list.","expected":{"title":"Buy groceries","priority":"medium"}}
+```
 
-See [CUSTOM_EVALUATION_RUNNERS.md](docs/CUSTOM_EVALUATION_RUNNERS.md).
+The example output is illustrative, not MTT's own schema. Your **application** defines required fields, permitted values, defaults, and post-inference validation. Evaluation questions must stay out of training if you want an independent generalization measurement.
 
-## Project-level shared evaluation benchmarks (v0.3.8)
+See [Data package contract](docs/DATA_PACKAGE_CONTRACT.md) and [Training a task-specific assistant](docs/TRAINING_TASK_SPECIFIC_ASSISTANTS.md).
 
-Project-owned benchmarks live at `projects/<project>/evaluations/<benchmark-name>/`,
-independently of model version. Each package declares an explicit **package version**
-and per-dataset SHA-256 hashes in its benchmark manifest; the historical semantic
-scoring contract can remain unchanged as more reviewed cases are added.
+## Evaluation options
 
-`shared-eval` audits the benchmark against the selected run's **frozen** training
-snapshot (including protected-holdout leakage), uses the run's frozen system prompt,
-and stores model-specific results under the existing run's `shared_evaluations/`.
-No training artifacts or earlier reports are overwritten. The project-owned Python
-runner (Ollama for ELI) performs inference; MTT only handles safe selection, audit,
-and delegation. Compare only results with matching benchmark package, case hashes,
-scorer and model/inference provenance.
+| Option | Appropriate use |
+|---|---|
+| Built-in `evaluate` | Basic exact-JSON regression checks |
+| Custom evaluation runner | Project-specific semantic correctness (e.g., equivalent plans, domain rules) |
+| Shared evaluation benchmark (`shared-eval`) | Reusable, versioned suites with targeted selection, historical comparison, and dataset hashes |
 
 ```bash
-bash projects/eli/project.sh shared-eval v9.2 \
-  --run RUN_ID --benchmark benchmark-v1.0.1 \
-  --audit-only
+# Evaluate a completed run with the built-in/custom evaluation entry point
+bash projects/example/project.sh evaluate v1 --run RUN_ID
 
-bash projects/eli/project.sh shared-eval v9.2 \
-  --run RUN_ID --benchmark benchmark-v1.0.1 \
-  --model datmm-eli:v9.2-f16 --stage generalization --dry-run
+# A project with an installed shared benchmark and its own evaluator can:
+bash projects/example/project.sh shared-eval v1 \
+  --run RUN_ID --benchmark BENCHMARK_NAME --list-suites
 
-bash projects/eli/project.sh shared-eval v9.2 \
-  --run RUN_ID --benchmark benchmark-v1.0.1 \
-  --model datmm-eli:v9.2-f16 --stage generalization
+bash projects/example/project.sh shared-eval v1 \
+  --run RUN_ID --benchmark BENCHMARK_NAME \
+  --model PROJECT_MODEL --suite SUITE_NAME --dry-run
 ```
 
-See `docs/SHARED_EVALUATIONS.md`. The original V9.2 training-baseline results
-remain version-specific and are **not** repeated by the shared command.
+Shared benchmarks are **optional project assets**; MTT does not bundle an ELI-specific semantic scorer or Ollama model. `--suite` on `shared-eval` selects one or several named suites, whereas `--suite` on the older custom `evaluate` workflow denotes its ordered stages. They are distinct interfaces. Both keep result provenance separate from training artifacts.
 
-## Sanity checks
+Read [Custom runners](docs/CUSTOM_EVALUATION_RUNNERS.md) and [Shared benchmarks](docs/SHARED_EVALUATIONS.md).
+
+## Exports, snapshots, and reproducibility
 
 ```bash
-python -m unittest discover -s tests -v
-bash workspace.sh --help
+# Export the completed LoRA run as merged Hugging Face SafeTensors
+bash workspace.sh export example v1 --run RUN_ID --format hf
 ```
 
-## Important boundaries
+Weights, GGUF files, checkpoints, caches, and the local `.venv` are **not committed to the framework repository**. The [project snapshot publisher](docs/PROJECT_SNAPSHOTS.md) can preserve a selected project's authored data, benchmark release, and frozen run recipe in a separate Git repository; trained weights require separate artifact storage. Model rebuilds may not be numerically bit-identical across differing hardware and library versions.
 
-The model suitability list is conservative guidance, **not** a guarantee the GPU can train a selected architecture. CUDA LoRA fine-tuning, not QLoRA or full-model training, is currently supported. The built-in evaluator uses exact JSON matching; project-supplied evaluators can implement DATMM semantic scoring without changing MTT. Actual training, Hugging Face downloads, and inference require the ML optional dependencies and have not been verified on every GPU architecture.
+## Documentation
 
-## GPU-aware PyTorch setup (v0.3.2)
+- [Training a task-specific assistant](docs/TRAINING_TASK_SPECIFIC_ASSISTANTS.md) — concepts and end-to-end worked example
+- [Architecture](docs/ARCHITECTURE.md) — core ownership and data flow
+- [Data package contract](docs/DATA_PACKAGE_CONTRACT.md) — validated input format
+- [Training backends](docs/UNSLOTH_BACKEND.md) — native PyTorch versus optional Unsloth
+- [Resumable checkpoints](docs/RESUMABLE_CHECKPOINTS.md) — safe recovery
+- [Custom evaluation runners](docs/CUSTOM_EVALUATION_RUNNERS.md) — executable scorer contract
+- [Shared evaluation benchmarks](docs/SHARED_EVALUATIONS.md) — suites, hashes, and release gates
+- [Project snapshot publishing](docs/PROJECT_SNAPSHOTS.md) — portable source and data snapshots
+- [Workspace health](docs/WORKSPACE_HEALTH.md) — diagnostics and repair
+- [Changelog](CHANGELOG.md) — release history
 
-`bash run_me_first.sh --install-ml` chooses the CUDA 12.8 PyTorch 2.10.0 build when an NVIDIA GPU is detected, checks a real CUDA tensor operation, and aborts on CUDA failure. The existing Python `.venv` remains isolated. An already verified `2.10.0+cu128` wheel is preserved. See `INSTALL_v0.3.2.md` for the non-destructive upgrade.
-
-## Single-command training (v0.3.3)
-
-The guided wizard still works: `bash projects/eli/project.sh train v9.0`.
-For automation or an ELI development chat, provide **every** run parameter explicitly:
-
-```bash
-bash workspace.sh train eli v9.0 \
-  --epochs 1 --max-length 4096 --learning-rate 2e-5 \
-  --gradient-accumulation 1 --seed 42 --weight-decay 0.01 \
-  --warmup-ratio 0.03 --max-grad-norm 1.0 --log-every 25 \
-  --lora-r 16 --lora-alpha 32 --lora-dropout 0.05 \
-  --lora-target-modules q_proj,v_proj \
-  --no-auto-eval --yes
-```
-
-Switch `--no-auto-eval` to `--auto-eval` to require an evaluation dataset and automatically run evaluation after successful training. The command fails before creating a run if any flag is missing, conflicting, or invalid. **These values are examples, not ELI-specific recommendations.** The fixed model remains defined at version creation. A fully parameterized run is recorded in a frozen run snapshot. `--yes` explicitly authorizes execution without prompts.
-
-The project-local entrypoint also accepts flags after the version: `bash projects/eli/project.sh train v9.0 [FLAGS...]`. Existing project launchers are refreshed by `bash workspace.sh upgrade`.
-
-
-## Architecture-audited training (v0.3.4)
-
-Single-command training also supports `--min-learning-rate`, `--precision`,
-`--attention-implementation`, `--optimizer`, `--gradient-checkpointing`
-(or `--no-gradient-checkpointing`), and `--save-every`.
-Every run records the **actual** PEFT-adapted layer paths, per-target counts,
-trainable and total parameters, attention, precision, scheduler, optimizer,
-prompt/tokenizer hashes, and runtime environment in `training_plan.json`
-**before the first optimizer update**. Requested target modules must all match;
-missing or unexpected PEFT LoRA targets abort the run.
-
-If a dataset provides validated `messages` with system/user/assistant text,
-that exact approved assistant text is used for loss masking and tokenization;
-it is not silently regenerated from `expected`.
-
-Intermediate checkpoints contain **adapter weights and tokenizer only**;
-optimizer/RNG state resume is **not yet supported** by this general-purpose
-backend. A new launch always starts fresh, creates a new run ID, and does not
-replace older runs. `--no-auto-eval` is recommended for work requiring semantic
-rather than exact-JSON evaluation until a suitable evaluator is installed.
-
-See `docs/V80_TRAINING_COMPARISON.md` for a precise comparison with the ELI
-V8.0 reference trainer supplied for the audit.
-
-## Optional Unsloth backend (v0.3.6)
-
-Training now offers `--backend pytorch` (the unchanged default) and `--backend unsloth`. The latter uses Unsloth for full-precision base loading and LoRA initialization, **without replacing MTT's masking, optimizer, scheduler, data package, or evaluation interface**. It accepts the same `--lora-target-modules` lists and refuses any missing targets or unexpected adapted layers.
-
-Install Unsloth only after stopping active training and backing up the existing pip environment; on an already GPU-enabled Windows installation, its official installation command is `python -m pip install unsloth` inside the MTT `.venv`. The optional `--unsloth-checkpointing standard|unsloth` chooses Unsloth's checkpointing strategy. See **[docs/UNSLOTH_BACKEND.md](docs/UNSLOTH_BACKEND.md)** and **[INSTALL_v0.3.6.md](INSTALL_v0.3.6.md)** for full prerequisites, a complete example command, and parity caveats.
-
-Unsloth is **not** automatically installed or selected, and the feature has not been benchmarked or GPU-smoke-tested on an RTX 5080 as part of this release.
-
-## Fully resumable training (v0.3.6)
-
-The native PyTorch and optional Unsloth training backends now write complete checkpoints (adapter, LoRA tensor state, AdamW optimizer, AMP scaler, RNG states, and exact microbatch position), defaulting to one every **500 optimizer updates**. Keep the latest three complete checkpoints by default; opt out with `--save-every 0` or retain all with `--keep-last-checkpoints 0`.
-
-```bash
-# Add to a full one-shot train command if a custom interval/retention is desired:
---save-every 500 --keep-last-checkpoints 3
-
-# After stopping an interrupted process, resume the *original* run:
-bash workspace.sh runs --project eli
-bash projects/eli/project.sh resume v9.1 --run RUN_ID
-# For a retained older checkpoint:
-bash workspace.sh resume eli v9.1 --run RUN_ID --checkpoint step_0000500
-```
-
-The `resume` command reuses the frozen input snapshot and settings; it neither starts another run nor changes the dataset. Only checkpoints created by v0.3.6 or later are fully resumable. See [Resumable checkpoints](docs/RESUMABLE_CHECKPOINTS.md) for safety, disk-space, and verification details. Existing adapter-only checkpoints cannot resume optimizer state.
-
-
-## Workspace health and state recovery (v0.4.0)
-
-`WORKSPACE_STATE.json` is a **machine-local metadata file**, not a source file or a record of
-model/training configuration. It is excluded from Git, along with read-only safety backups
-under `.workspace_state_backups/`. Do not commit it.
-
-- `bash workspace.sh doctor` is **read-only**. It checks the workspace environment and
-  reports missing, stale or corrupt state rather than trusting the state file as proof
-  the workspace is functional. It exits nonzero when the workspace is unhealthy.
-- `bash workspace.sh doctor --repair` backs up any existing state file, then repairs **only**
-  state metadata after validating the local venv, interpreter, and basic workspace layout.
-  Missing, stale, and corrupt state can be recovered without rerunning bootstrap. Broken
-  environments are never marked ready automatically.
-- `bash workspace.sh upgrade` validates the environment and refreshes state metadata
-  **after** any project launcher/data-contract upgrade operations have succeeded.
-  It can recover a lost state file and does not reinstall packages or change frozen runs.
-
-See [docs/WORKSPACE_HEALTH.md](docs/WORKSPACE_HEALTH.md).
-
-## Targeted benchmark evaluation (v0.3.9)
-
-Use `shared-eval ... --list-suites`, `--suite v72_graph_26`, repeated/comma-separated `--suite` options, or `--stage all` against ELI `benchmark-v1.0.2`. See `docs/SHARED_EVALUATIONS.md` and `INSTALL_v0.3.9.md`. Existing 0.3.8 behavior stays supported.
-
-## Publish a reproducible project snapshot
-
-To preserve a project version's training corpus, frozen run settings and shared
-evaluation cases in an **independent** GitHub repository without modifying
-MTT's `origin` or `.gitignore`, use `scripts/publish_project_snapshot.py`.
-The command previews by default and requires an explicit `--push` and
-repository visibility acknowledgement to publish. It excludes trained weights
-and checkpoints. See [Project snapshot publishing](docs/PROJECT_SNAPSHOTS.md).
+Run offline tests with `python -m unittest discover -s tests -q`. Review project-provided Python evaluation runners before executing them: **they are trusted code, not sandboxed plugins**.
