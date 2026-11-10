@@ -121,3 +121,50 @@ storage (e.g. private S3). They are intentionally excluded from ordinary Git.
   remote advanced while exporting, rerun against its updated state.
 - The snapshot is a source/data repository, not a copy of the originating
   repository's entire Git history. The source commit SHA is recorded.
+
+## Refreshing MTT code in a repository that already has a model snapshot
+
+The initial snapshot is **immutable**. Running the original publisher with the
+same `--run` after the MTT source commit changes would fail because its
+`manifest.json` records the original source commit and file hashes. It also
+would not remove deleted toolkit files from the destination.
+
+Use **`--sync-toolkit`** for framework-only updates instead. First merge and pull
+any source changes you want to publish (for example, removing obsolete
+`INSTALL_*.md` handoff documents from the MTT main branch). Then, from the
+original operational MTT checkout:
+
+```bash
+cd ~/model-training-toolkit
+REPO=https://github.com/echicoine-icf/datmm-model-training-toolkit.git
+RUN=run_20261109T002925408171Z_a4a5de
+
+# Local dry run: lists source files without contacting/changing the destination.
+python scripts/publish_project_snapshot.py \
+  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
+  --sync-toolkit
+
+# Sync only the latest committed toolkit source (no model/data modifications).
+python scripts/publish_project_snapshot.py \
+  --repo-url "$REPO" --project eli --version v9.2 --run "$RUN" \
+  --sync-toolkit --push --visibility private
+```
+
+This mode updates tracked toolkit source, adds new toolkit files, and removes
+obsolete toolkit files **only when they match the last published hashes**.
+It refuses to overwrite destination-only edits or collide with existing files.
+It never writes to `projects/`, `rebuild_recipes/`, or the original snapshot
+receipt. A new immutable source-refresh receipt is written under:
+
+`snaps​hots/PROJECT/VERSION/RUN/toolkit_refreshes/SOURCE_COMMIT.json`
+
+and `toolkit_refreshes/latest.json` points at the most recent receipt. The
+original model snapshot receipt remains as a historical record. Ordinary
+GitHub pulls in the *operational* source checkout continue to use their usual
+`origin` remote; publishing uses a separate temporary clone.
+
+The target must already contain a snapshot published using the original
+publisher. If it is still empty, use the standard initial publish command
+(including `--benchmark`) first, and then use `--sync-toolkit` for subsequent
+framework updates. The tool does not change repository visibility; you must
+confirm privacy in GitHub before publishing training data.

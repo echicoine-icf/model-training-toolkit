@@ -142,6 +142,76 @@ class ProjectSnapshotTests(unittest.TestCase):
         self.assertFalse((dest/'projects/eli/evaluations/external/ELI_VALIDATOR/ollama_results').exists())
         self.assertFalse((dest/'projects/eli/evaluations/external/ELI_VALIDATOR/ELI_V92_BASELINE_RESULTS.zip').exists())
 
+    def test_sync_toolkit_updates_code_and_removes_obsolete_install_docs(self):
+        put(self.root/'INSTALL_v0.3.9.md', 'obsolete install handoff\n')
+        git('add', 'INSTALL_v0.3.9.md', cwd=self.root)
+        git('commit', '-m', 'old docs', cwd=self.root)
+        mod.run(self.args(), root=self.root)
+        base = self.published_checkout()
+        before = (base/f'snapshots/eli/v9.2/{self.run_id}/manifest.json').read_bytes()
+        self.assertTrue((base/'INSTALL_v0.3.9.md').exists())
+        data_before = (base/'projects/eli/versions/v9.2/data/train.jsonl').read_bytes()
+
+        git('rm', 'INSTALL_v0.3.9.md', cwd=self.root)
+        put(self.root/'README.md', 'updated MTT docs\n')
+        put(self.root/'toolkit/new_feature.py', 'print("new")\n')
+        git('add', 'README.md', 'toolkit/new_feature.py', cwd=self.root)
+        git('commit', '-m', 'clean old handoffs and update toolkit', cwd=self.root)
+        mod.run(self.args(sync_toolkit=True, benchmark=[]), root=self.root)
+        after = self.base/'updated'
+        git('clone', self.remote, after, cwd=self.base)
+        self.assertEqual((after/'README.md').read_text(), 'updated MTT docs\n')
+        self.assertTrue((after/'toolkit/new_feature.py').exists())
+        self.assertFalse((after/'INSTALL_v0.3.9.md').exists())
+        self.assertEqual((after/f'snapshots/eli/v9.2/{self.run_id}/manifest.json').read_bytes(), before)
+        self.assertEqual((after/'projects/eli/versions/v9.2/data/train.jsonl').read_bytes(), data_before)
+        self.assertTrue((after/'projects/eli/evaluations/benchmark-v1.0.2/cases/gold.jsonl').exists())
+        latest=json.loads((after/f'snapshots/eli/v9.2/{self.run_id}/toolkit_refreshes/latest.json').read_text())
+        self.assertEqual(latest['source_commit'], git('rev-parse', 'HEAD', cwd=self.root))
+        self.assertEqual(git('status','--porcelain',cwd=self.root),'')
+
+    def test_sync_toolkit_is_idempotent(self):
+        mod.run(self.args(), root=self.root)
+        put(self.root/'README.md', 'new version\n')
+        git('add','README.md', cwd=self.root)
+        git('commit','-m','new version',cwd=self.root)
+        sync=self.args(sync_toolkit=True,benchmark=[])
+        mod.run(sync, root=self.root)
+        head=git('--git-dir',self.remote,'rev-parse','HEAD',cwd=self.base)
+        mod.run(sync, root=self.root)
+        self.assertEqual(git('--git-dir',self.remote,'rev-parse','HEAD',cwd=self.base),head)
+
+    def test_sync_toolkit_rejects_manually_modified_destination_code(self):
+        mod.run(self.args(), root=self.root)
+        clone=self.published_checkout()
+        git('config','user.name','Tester',cwd=clone)
+        git('config','user.email','test@example.com',cwd=clone)
+        put(clone/'README.md','custom private repo changes\n')
+        git('add','README.md',cwd=clone)
+        git('commit','-m','local customization',cwd=clone)
+        git('push','origin','main',cwd=clone)
+        put(self.root/'README.md','new version\n')
+        git('add','README.md',cwd=self.root)
+        git('commit','-m','new version',cwd=self.root)
+        with self.assertRaisesRegex(RuntimeError,'independently'):
+            mod.run(self.args(sync_toolkit=True,benchmark=[]), root=self.root)
+
+    def test_sync_toolkit_refuses_empty_destination(self):
+        with self.assertRaisesRegex(RuntimeError,'original snapshot receipt|Original snapshot receipt'):
+            mod.run(self.args(sync_toolkit=True,benchmark=[]), root=self.root)
+
+    def test_sync_toolkit_does_not_require_training_inputs(self):
+        mod.run(self.args(), root=self.root)
+        (self.root/'projects/eli/versions/v9.2/data/train.jsonl').unlink()
+        (self.root/'runs/eli/v9.2'/self.run_id/'input/data/train.jsonl').unlink()
+        put(self.root/'README.md','revised docs\n')
+        git('add','README.md',cwd=self.root)
+        git('commit','-m','docs revision',cwd=self.root)
+        mod.run(self.args(sync_toolkit=True,benchmark=[]),root=self.root)
+        after=self.base/'updated'
+        git('clone',self.remote,after,cwd=self.base)
+        self.assertTrue((after/'projects/eli/versions/v9.2/data/train.jsonl').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
