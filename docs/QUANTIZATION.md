@@ -8,7 +8,8 @@ past evaluations. Each format writes its own artifact and hash receipt.
 
 | `--format` | Source | Destination | Serving/runtime | Purpose |
 |---|---|---|---|---|
-| `gguf-q8_0` | `exports/model-f16.gguf` | `exports/model-q8_0.gguf` | Ollama / llama.cpp | Local comparison against the existing shared benchmark |
+| `gguf-q8_0` | `exports/model-f16.gguf` | `exports/model-q8_0.gguf` | Ollama / llama.cpp | 8-bit comparison against the existing shared benchmark |
+| `gguf-q4_k_m` | `exports/model-f16.gguf` | `exports/model-q4_k_m.gguf` | Ollama / llama.cpp | Lower-memory 4-bit comparison using Q4_K_M |
 | `vllm-fp8` | `exports/merged_hf/` | `exports/vllm-fp8/` | vLLM + compatible CUDA GPU | 8-bit float weights/activations; data-free FP8_DYNAMIC |
 | `vllm-int8` | `exports/merged_hf/` | `exports/vllm-int8/` | vLLM compatible deployment | Experimental 8-bit integer **weight-only** W8A16; not an INT8 W8A8 activation path |
 
@@ -179,3 +180,29 @@ correctness, use the shared ELI evaluator separately.
 - Avoid changing MTT's `.venv`, Unsloth installation, or PyTorch packages.
 
 Official documentation: [llama.cpp GGUF quantization](https://github.com/ggml-org/llama.cpp), [vLLM quantization](https://docs.vllm.ai/en/latest/features/quantization/), [LLM Compressor FP8_DYNAMIC](https://docs.vllm.ai/projects/llm-compressor/en/latest/examples/quantization_w8a8_fp8/), and [vLLM online quantization](https://docs.vllm.ai/en/latest/features/quantization/online/).
+
+## Q4_K_M: ELI V9.2 accuracy experiment
+
+Quantize **from the original F16 GGUF**, not from the Q8 GGUF; repeated
+quantization can degrade quality. MTT reuses the existing quantizer and preserves
+F16, Q8, all previous evaluations, and benchmark files.
+
+```bash
+cd ~/model-training-toolkit
+RUN=run_20261109T002925408171Z_a4a5de
+
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format gguf-q4_k_m --ollama-model datmm-eli:v9.2-q4 --dry-run
+
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format gguf-q4_k_m --ollama-model datmm-eli:v9.2-q4
+
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" \
+  --benchmark benchmark-v1.0.2 --model datmm-eli:v9.2-q4 \
+  --stage all --resume
+```
+
+The Q4 model has its own file, Modelfile, receipt, Ollama tag, and evaluation
+output path. Check semantic accuracy and case-level regressions against F16 and
+Q8 using the same benchmark version and decoding settings. GGUF Q4_K_M is a
+**llama.cpp / Ollama** format, not a vLLM FP8 checkpoint.
