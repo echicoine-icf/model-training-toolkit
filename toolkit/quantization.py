@@ -1,4 +1,4 @@
-"""Non-destructive post-training export: GGUF Q8_0/Q4_K_M and vLLM compressed checkpoints.
+"""Non-destructive post-training export: GGUF Q8_0/Q4_K_M/Q2_K and vLLM compressed checkpoints.
 
 This module deliberately uses only the Python standard library. ML quantization
 runs in an explicitly selected *separate* Python environment.
@@ -13,8 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-GGUF_QUANT_TYPES = {'gguf-q8_0': 'Q8_0', 'gguf-q4_k_m': 'Q4_K_M'}
-FORMATS = (*GGUF_QUANT_TYPES, 'vllm-fp8', 'vllm-int8', 'vllm-w4a16')
+GGUF_QUANT_TYPES = {'gguf-q8_0': 'Q8_0', 'gguf-q4_k_m': 'Q4_K_M', 'gguf-q2_k': 'Q2_K'}
+FORMATS = (*GGUF_QUANT_TYPES, 'vllm-fp8', 'vllm-int8', 'vllm-w4a16', 'vllm-w2a16')
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -162,7 +162,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         source_digest = _file_manifest(source)
         engine = python
         cmd = [str(python), str(script), '--source', str(source), '--output', str(dest),
-               '--scheme', {'vllm-fp8': 'FP8_DYNAMIC', 'vllm-int8': 'W8A16', 'vllm-w4a16': 'W4A16'}[fmt]]
+               '--scheme', {'vllm-fp8': 'FP8_DYNAMIC', 'vllm-int8': 'W8A16', 'vllm-w4a16': 'W4A16', 'vllm-w2a16': 'W2A16'}[fmt]]
     if ollama_model and not is_gguf:
         raise ValueError('--ollama-model is available only for GGUF quantization')
     if ollama_model and (not ollama_model.strip() or any(c.isspace() for c in ollama_model)):
@@ -175,6 +175,10 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         'project': project, 'version': version, 'run': run, 'format': fmt,
         'input': str(source), 'output': str(dest), 'source_integrity': source_digest,
         'command': cmd, 'ollama_model': ollama_model,
+        'serving_compatibility': (
+            'experimental: must validate loading on the target vLLM version and GPU'
+            if fmt == 'vllm-w2a16' else 'not verified by the quantization command'
+        ),
     }
     if build_commands:
         result['quantizer_auto_build_commands'] = build_commands

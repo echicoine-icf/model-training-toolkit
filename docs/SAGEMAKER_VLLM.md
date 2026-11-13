@@ -11,13 +11,14 @@ The supported official deployment path uses the AWS **SageMaker vLLM Deep Learni
 | `hf-f16` | `exports/merged_hf/` | Original merged SafeTensors; no new compression | Baseline. This is the model's saved dtype, not a guaranteed BF16 conversion |
 | `vllm-fp8` | `exports/vllm-fp8/` | `FP8_DYNAMIC`, 8-bit weights / dynamic activations | Compare against baseline on the same vLLM hardware |
 | `vllm-int8` | `exports/vllm-int8/` | `W8A16`, 8-bit weight-only RTN | Different from FP8 or W8A8 |
-| `vllm-w4a16` | `exports/vllm-w4a16/` | `W4A16`, 4-bit weight-only RTN | **Experimental**: accuracy may degrade; calibrated GPTQ is a possible later improvement |
+| `vllm-w4a16` | `exports/vllm-w4a16/` | `W4A16`, 4-bit weight-only RTN | Test accuracy and GPU compatibility |
+| `vllm-w2a16` | `exports/vllm-w2a16/` | `W2A16`, 2-bit weight-only RTN | **Highly experimental**: generation is supported by LLM Compressor, but target vLLM/GPU loading must be proven |
 
 GGUF `gguf-q8_0` and `gguf-q4_k_m` remain useful Ollama accuracy experiments but are **not** the source for vLLM compression. All vLLM quantization starts from the original `merged_hf/`. 4-bit `W4A16` uses 16-bit activations; it does not halve the vLLM KV-cache footprint. `--kv-cache-dtype fp8` is an *independent* optional inference setting with its own accuracy considerations.
 
 ### Step 1: produce selected quantizations
 
-The completed ELI V9.2 run already has `exports/merged_hf/`, suitable for F16. FP8/INT8/W4A16 creation needs an **isolated** Python environment containing compatible Torch, Transformers, SafeTensors, and LLM Compressor. Do **not** change the working MTT CUDA/Unsloth venv. On Windows, WSL2 or a separate Linux compression host is advisable.
+The completed ELI V9.2 run already has `exports/merged_hf/`, suitable for F16. FP8/INT8/W4A16/W2A16 creation needs an **isolated** Python environment containing compatible Torch, Transformers, SafeTensors, and LLM Compressor. Do **not** change the working MTT CUDA/Unsloth venv. On Windows, WSL2 or a separate Linux compression host is advisable.
 
 ```bash
 cd ~/model-training-toolkit
@@ -39,7 +40,7 @@ Each has its own immutable destination and SHA-256 receipt. If one already exist
 
 ### Step 2: package and stage the chosen export
 
-The following is **offline** until `upload --apply`. Package `hf-f16`, `vllm-fp8`, `vllm-int8`, and `vllm-w4a16` separately, choosing one at a time to deploy. The packager validates receipt hashes for quantized exports and creates a new `model.tar.gz` plus a sidecar receipt.
+The following is **offline** until `upload --apply`. Package `hf-f16`, `vllm-fp8`, `vllm-int8`, and `vllm-w4a16`, and experimental `vllm-w2a16` separately, choosing one at a time to deploy. The packager validates receipt hashes for quantized exports and creates a new `model.tar.gz` plus a sidecar receipt.
 
 ```bash
 python scripts/sagemaker_vllm.py package \
@@ -103,8 +104,20 @@ python scripts/sagemaker_vllm.py invoke --endpoint datmm-eli-v92-fp8 \
 
 To measure behavior under traffic, use `scripts/benchmark_sagemaker.py` with the **same frozen cases/system prompt** used in your ELI benchmark. The script measures successful and failed requests and p50/p95 latency at concurrency 1,8,32; it does **not** substitute for semantic accuracy evaluation. Standard SageMaker real-time requests have a response-time limit, so timeouts must be counted as failures rather than silently excluded.
 
-For local semantic evaluation, serve the exact SafeTensors artifact through a compatible local vLLM server and use `scripts/vllm_eval_bridge.py` with the existing `shared-eval --stage all`. Use `--model-dir /path/to/exports/merged_hf` for the F16 baseline, or `--receipt /path/to/vllm-fp8/MTT_QUANTIZATION.json` (likewise INT8/W4A16) for quantized exports. Each run needs a distinct served model tag and result directory. Compare F16/FP8/INT8/W4A16 under matched generation parameters, scoring version, model tag, and benchmark. **Do not promote a quantized candidate solely because it fits VRAM.**
+For local semantic evaluation, serve the exact SafeTensors artifact through a compatible local vLLM server and use `scripts/vllm_eval_bridge.py` with the existing `shared-eval --stage all`. Use `--model-dir /path/to/exports/merged_hf` for the F16 baseline, or `--receipt /path/to/vllm-fp8/MTT_QUANTIZATION.json` (likewise INT8/W4A16/W2A16) for quantized exports. Each run needs a distinct served model tag and result directory. Compare F16/FP8/INT8/W4A16/W2A16 under matched generation parameters, scoring version, model tag, and benchmark. **Do not promote a quantized candidate solely because it fits VRAM.**
 
 ## Production readiness requirements
 
 Before routing DATMM user traffic: verify model load and inference on the selected SageMaker image/GPU; freeze the image tag and benchmark receipts; run the complete ELI semantic holdout and regressions for the deployed runtime; configure IAM least privilege, VPC/network security, CloudWatch, endpoint auto scaling, realistic concurrency load tests, timeouts, and a rollback plan. This module handles packaging and explicit initial provisioning, **not** those external operational approvals or ongoing deployments. The endpoint is not deployed until `--apply` succeeds in your AWS account.
+
+### Experimental W2A16 (2-bit) deployment gate
+
+`vllm-w2a16` is supported by the MTT exporter and packager, **not
+prequalified for SageMaker production serving**. LLM Compressor exposes a
+`W2A16` preset, but vLLM 2-bit kernels and behavior depend on the exact
+release, accelerator and quantization scheme. A successful quantization or
+model packaging operation does **not** mean the model will load or serve.
+Do not switch the always-on endpoint to a 2-bit candidate without
+(1) a successful vLLM startup on the target GPU, (2) the full frozen semantic
+evaluation, and (3) a multi-request memory/concurrency test. The production
+`hf-f16`/FP8/INT8/INT4 choices are preserved as fallbacks.

@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 def model_digest(receipt: Path) -> str:
     data = json.loads(receipt.read_text(encoding='utf-8'))
-    if data.get('format') not in ('vllm-fp8', 'vllm-int8', 'vllm-w4a16'):
+    if data.get('format') not in ('vllm-fp8', 'vllm-int8', 'vllm-w4a16', 'vllm-w2a16'):
         raise ValueError('Receipt is not for an MTT vLLM quantized model')
     files = data.get('output_integrity')
     if not isinstance(files, dict) or not any(k.endswith('.safetensors') for k in files):

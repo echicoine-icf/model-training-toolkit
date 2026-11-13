@@ -2,7 +2,7 @@
 """Produce vLLM compressed-tensors checkpoints in an isolated Python environment.
 
 Install transformers, torch, safetensors and llmcompressor ONLY in that environment.
-No calibration is used for FP8_DYNAMIC, W8A16, or W4A16 weight-only quantization.
+No calibration is used for FP8_DYNAMIC, W8A16, or W4A16, or experimental W2A16 weight-only quantization.
 """
 import argparse
 import json
@@ -13,7 +13,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description='Compress an existing merged HF model for vLLM')
     p.add_argument('--source', required=True)
     p.add_argument('--output', required=True)
-    p.add_argument('--scheme', choices=['FP8_DYNAMIC', 'W8A16', 'W4A16'], required=True)
+    p.add_argument('--scheme', choices=['FP8_DYNAMIC', 'W8A16', 'W4A16', 'W2A16'], required=True)
     args = p.parse_args(argv)
     source = Path(args.source).resolve()
     out = Path(args.output).resolve()
