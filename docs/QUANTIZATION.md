@@ -206,3 +206,7 @@ The Q4 model has its own file, Modelfile, receipt, Ollama tag, and evaluation
 output path. Check semantic accuracy and case-level regressions against F16 and
 Q8 using the same benchmark version and decoding settings. GGUF Q4_K_M is a
 **llama.cpp / Ollama** format, not a vLLM FP8 checkpoint.
+
+## Production vLLM / SageMaker path
+
+MTT also supports `vllm-w4a16`: weight-only 4-bit **W4A16 RTN** compressed SafeTensors created from `exports/merged_hf/` with `--quant-python`. This is separate from GGUF Q4_K_M and must pass semantic validation independently. For the F16/FP8/INT8/INT4 SafeTensors-to-S3 packaging, a persistent SageMaker vLLM endpoint, and concurrency autoscaling, see [SageMaker vLLM deployment](SAGEMAKER_VLLM.md). No extra release or installation handoff files are used.

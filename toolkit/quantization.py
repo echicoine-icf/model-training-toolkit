@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 GGUF_QUANT_TYPES = {'gguf-q8_0': 'Q8_0', 'gguf-q4_k_m': 'Q4_K_M'}
-FORMATS = (*GGUF_QUANT_TYPES, 'vllm-fp8', 'vllm-int8')
+FORMATS = (*GGUF_QUANT_TYPES, 'vllm-fp8', 'vllm-int8', 'vllm-w4a16')
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -126,7 +126,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
     is_gguf = fmt in GGUF_QUANT_TYPES
     gguf_suffix = GGUF_QUANT_TYPES[fmt].lower() if is_gguf else None
     source = exports / ('model-f16.gguf' if is_gguf else 'merged_hf')
-    dest = exports / (f'model-{gguf_suffix}.gguf' if is_gguf else ('vllm-fp8' if fmt=='vllm-fp8' else 'vllm-int8'))
+    dest = exports / (f'model-{gguf_suffix}.gguf' if is_gguf else fmt)
     if not source.exists() or (source.is_file() if not is_gguf else not source.is_file()):
         raise FileNotFoundError(f'Source artifact missing: {source}. First export the completed model.')
     if not is_gguf and not (source/'config.json').is_file():
@@ -150,7 +150,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         cmd = [tool_name, str(source), str(dest), GGUF_QUANT_TYPES[fmt]]
     else:
         if not quant_python:
-            raise ValueError('FP8/INT8 export requires --quant-python pointing to a separate environment with llmcompressor. Do not install it in MTT .venv.')
+            raise ValueError('vLLM compressed export requires --quant-python pointing to a separate environment with llmcompressor. Do not install it in MTT .venv.')
         python = Path(quant_python).expanduser().resolve()
         if not python.is_file():
             raise FileNotFoundError(f'Quantization Python not found: {python}')
@@ -162,7 +162,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         source_digest = _file_manifest(source)
         engine = python
         cmd = [str(python), str(script), '--source', str(source), '--output', str(dest),
-               '--scheme', ('FP8_DYNAMIC' if fmt=='vllm-fp8' else 'W8A16')]
+               '--scheme', {'vllm-fp8': 'FP8_DYNAMIC', 'vllm-int8': 'W8A16', 'vllm-w4a16': 'W4A16'}[fmt]]
     if ollama_model and not is_gguf:
         raise ValueError('--ollama-model is available only for GGUF quantization')
     if ollama_model and (not ollama_model.strip() or any(c.isspace() for c in ollama_model)):
