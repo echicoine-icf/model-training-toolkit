@@ -1,4 +1,4 @@
-"""Non-destructive post-training export: Q8_0 GGUF and vLLM compressed checkpoints.
+"""Non-destructive post-training export: GGUF Q8_0/Q4_K_M and vLLM compressed checkpoints.
 
 This module deliberately uses only the Python standard library. ML quantization
 runs in an explicitly selected *separate* Python environment.
@@ -13,7 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-FORMATS = ('gguf-q8_0', 'vllm-fp8', 'vllm-int8')
+GGUF_QUANT_TYPES = {'gguf-q8_0': 'Q8_0', 'gguf-q4_k_m': 'Q4_K_M'}
+FORMATS = (*GGUF_QUANT_TYPES, 'vllm-fp8', 'vllm-int8')
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -122,9 +123,10 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
     if meta.get('status') not in ('trained', 'evaluated', 'exported', 'evaluation_failed'):
         raise RuntimeError('Training must complete before quantization.')
     exports = folder / 'exports'
-    is_gguf = fmt == 'gguf-q8_0'
+    is_gguf = fmt in GGUF_QUANT_TYPES
+    gguf_suffix = GGUF_QUANT_TYPES[fmt].lower() if is_gguf else None
     source = exports / ('model-f16.gguf' if is_gguf else 'merged_hf')
-    dest = exports / ('model-q8_0.gguf' if is_gguf else ('vllm-fp8' if fmt=='vllm-fp8' else 'vllm-int8'))
+    dest = exports / (f'model-{gguf_suffix}.gguf' if is_gguf else ('vllm-fp8' if fmt=='vllm-fp8' else 'vllm-int8'))
     if not source.exists() or (source.is_file() if not is_gguf else not source.is_file()):
         raise FileNotFoundError(f'Source artifact missing: {source}. First export the completed model.')
     if not is_gguf and not (source/'config.json').is_file():
@@ -145,7 +147,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         source_digest = _sha256(source)
         # A dry run must plan missing builds without executing CMake.
         tool_name = str(engine) if engine else '<llama-quantize: resolved after automatic CMake build>'
-        cmd = [tool_name, str(source), str(dest), 'Q8_0']
+        cmd = [tool_name, str(source), str(dest), GGUF_QUANT_TYPES[fmt]]
     else:
         if not quant_python:
             raise ValueError('FP8/INT8 export requires --quant-python pointing to a separate environment with llmcompressor. Do not install it in MTT .venv.')
@@ -162,11 +164,11 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         cmd = [str(python), str(script), '--source', str(source), '--output', str(dest),
                '--scheme', ('FP8_DYNAMIC' if fmt=='vllm-fp8' else 'W8A16')]
     if ollama_model and not is_gguf:
-        raise ValueError('--ollama-model is available only for gguf-q8_0')
+        raise ValueError('--ollama-model is available only for GGUF quantization')
     if ollama_model and (not ollama_model.strip() or any(c.isspace() for c in ollama_model)):
         raise ValueError('Invalid Ollama model tag')
-    if ollama_model and (exports/'Modelfile.q8_0').exists():
-        raise FileExistsError('Modelfile.q8_0 already exists; refusing overwrite')
+    if ollama_model and (exports/f'Modelfile.{gguf_suffix}').exists():
+        raise FileExistsError(f'Modelfile.{gguf_suffix} already exists; refusing overwrite')
     if num_ctx < 512:
         raise ValueError('--num-ctx must be at least 512')
     result = {
@@ -214,7 +216,7 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         # Preserve partial files for inspection, and never overwrite a good artifact.
         raise
     if ollama_model:
-        modelfile = exports / 'Modelfile.q8_0'
+        modelfile = exports / f'Modelfile.{gguf_suffix}'
         if modelfile.exists():
             raise FileExistsError(f'Modelfile already exists: {modelfile}')
         modelfile.write_text(f'FROM ./{dest.name}\nPARAMETER temperature 0\nPARAMETER num_ctx {num_ctx}\n', encoding='utf-8')

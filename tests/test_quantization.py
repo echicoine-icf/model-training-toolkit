@@ -45,6 +45,41 @@ class QuantizationTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.runq(fmt='gguf-q8_0',quantizer=str(self.quantizer),runner=fake)
 
+    def test_gguf_q4_k_m_uses_f16_source_and_own_receipt(self):
+        commands=[]
+        def fake(cmd,check):
+            commands.append(cmd)
+            Path(cmd[2]).write_bytes(b'GGUF Q4_K_M output')
+        # A previously completed Q8 export does not block a new Q4 export.
+        (self.exports/'model-q8_0.gguf').write_bytes(b'previous Q8')
+        result=self.runq(fmt='gguf-q4_k_m',quantizer=str(self.quantizer),runner=fake)
+        self.assertEqual(commands[0][-1],'Q4_K_M')
+        self.assertEqual(Path(commands[0][1]),self.exports/'model-f16.gguf')
+        self.assertEqual(result['format'],'gguf-q4_k_m')
+        self.assertTrue((self.exports/'model-q4_k_m.gguf').is_file())
+        self.assertTrue((self.exports/'model-q4_k_m.mtt-quantization.json').is_file())
+        self.assertEqual((self.exports/'model-q8_0.gguf').read_bytes(),b'previous Q8')
+        self.assertEqual((self.exports/'model-f16.gguf').read_bytes(),b'GGUF abcdefghi')
+        with self.assertRaises(FileExistsError):
+            self.runq(fmt='gguf-q4_k_m',quantizer=str(self.quantizer),runner=fake)
+
+    def test_gguf_q4_k_m_ollama_registration_and_dry_run(self):
+        plan=self.runq(fmt='gguf-q4_k_m',quantizer=str(self.quantizer),
+                       ollama_model='datmm-eli:v9.2-q4',dry_run=True,
+                       runner=lambda *_args,**_kwargs:self.fail('dry run executes nothing'))
+        self.assertEqual(plan['command'][-1],'Q4_K_M')
+        self.assertFalse((self.exports/'Modelfile.q4_k_m').exists())
+        calls=[]
+        def fake(cmd,check):
+            calls.append(cmd)
+            if cmd[-1]=='Q4_K_M':
+                Path(cmd[2]).write_bytes(b'GGUF Q4')
+        result=self.runq(fmt='gguf-q4_k_m',quantizer=str(self.quantizer),
+                         ollama_model='datmm-eli:v9.2-q4',runner=fake)
+        self.assertIn('FROM ./model-q4_k_m.gguf',(self.exports/'Modelfile.q4_k_m').read_text())
+        self.assertEqual(result['ollama_created'],'datmm-eli:v9.2-q4')
+        self.assertEqual(calls[1][:3],['ollama','create','datmm-eli:v9.2-q4'])
+
     def test_gguf_ollama_registration_writes_modelfile(self):
         calls=[]
         def fake(cmd,check):
