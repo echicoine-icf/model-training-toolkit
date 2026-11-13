@@ -155,4 +155,83 @@ class QuantizationTests(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();t.join()
 
+    def test_missing_quantizer_dry_run_plans_build_without_running(self):
+        from unittest.mock import patch
+        source=self.root/'tools'/'llama.cpp'
+        source.mkdir(parents=True)
+        (source/'CMakeLists.txt').write_text('project(llama)')
+        with patch('toolkit.quantization.shutil.which',return_value=None):
+            result=self.runq(fmt='gguf-q8_0',dry_run=True,
+                             runner=lambda *_args,**_kwargs: self.fail('dry run must not build'))
+        self.assertEqual(len(result['quantizer_auto_build_commands']),2)
+        self.assertEqual(result['quantizer_auto_build_commands'][0][0],'cmake')
+        self.assertEqual(result['quantizer_auto_build_commands'][1][-2:],['--parallel','8'])
+        self.assertIn('resolved after automatic CMake build',result['command'][0])
+        self.assertFalse((source/'build').exists())
+
+    def test_missing_quantizer_is_built_then_used(self):
+        from unittest.mock import patch
+        source=self.root/'tools'/'llama.cpp'
+        source.mkdir(parents=True)
+        (source/'CMakeLists.txt').write_text('project(llama)')
+        binary=source/'build'/'mtt-quantize'/'bin'/'Release'/'llama-quantize.exe'
+        calls=[]
+        def fake(cmd,check):
+            calls.append(cmd)
+            if cmd[0]=='cmake' and '--target' in cmd:
+                binary.parent.mkdir(parents=True,exist_ok=True)
+                binary.write_bytes(b'compiled utility')
+            elif cmd[0]==str(binary):
+                Path(cmd[2]).write_bytes(b'GGUF Q8')
+        with patch('toolkit.quantization.shutil.which',side_effect=lambda n: 'C:/cmake.exe' if n=='cmake' else None):
+            result=self.runq(fmt='gguf-q8_0',runner=fake)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(calls[0][0],'cmake')
+        self.assertEqual(calls[1][calls[1].index('--target')+1],'llama-quantize')
+        self.assertEqual(calls[2][0],str(binary))
+        self.assertEqual(result['quantizer_binary_sha256'],__import__('hashlib').sha256(b'compiled utility').hexdigest())
+        self.assertEqual((self.exports/'model-q8_0.gguf').read_bytes(),b'GGUF Q8')
+
+    def test_disable_auto_build_and_explicit_missing_quantizer(self):
+        source=self.root/'tools'/'llama.cpp'
+        source.mkdir(parents=True)
+        (source/'CMakeLists.txt').write_text('project(llama)')
+        with patch('toolkit.quantization.shutil.which',return_value=None):
+            with self.assertRaisesRegex(FileNotFoundError,'Auto-build is disabled'):
+                self.runq(fmt='gguf-q8_0',auto_build_quantizer=False)
+            with self.assertRaisesRegex(FileNotFoundError,'Explicit --quantizer not found'):
+                self.runq(fmt='gguf-q8_0',quantizer='does-not-exist.exe')
+
+    def test_missing_cmake_is_actionable_and_preserves_model(self):
+        source=self.root/'tools'/'llama.cpp'
+        source.mkdir(parents=True)
+        (source/'CMakeLists.txt').write_text('project(llama)')
+        with patch('toolkit.quantization.shutil.which',return_value=None):
+            with self.assertRaisesRegex(RuntimeError,'CMake is not on PATH'):
+                self.runq(fmt='gguf-q8_0')
+        self.assertTrue((self.exports/'model-f16.gguf').exists())
+        self.assertFalse((self.exports/'model-q8_0.gguf').exists())
+
+    def test_failed_cmake_build_reports_compiler_error(self):
+        import subprocess
+        source=self.root/'tools'/'llama.cpp'
+        source.mkdir(parents=True)
+        (source/'CMakeLists.txt').write_text('project(llama)')
+        def fake(cmd,check):
+            raise subprocess.CalledProcessError(1,cmd)
+        with patch('toolkit.quantization.shutil.which',side_effect=lambda n: 'C:/cmake.exe' if n=='cmake' else None):
+            with self.assertRaisesRegex(RuntimeError,'Automatic llama-quantize build failed'):
+                self.runq(fmt='gguf-q8_0',runner=fake)
+        self.assertFalse((self.exports/'model-q8_0.gguf').exists())
+        self.assertFalse((self.exports/'model-q8_0.gguf.partial').exists())
+
+    def test_auto_build_skips_when_quantizer_exists(self):
+        calls=[]
+        def fake(cmd,check):
+            calls.append(cmd)
+            Path(cmd[2]).write_bytes(b'GGUF new Q8_0')
+        self.runq(fmt='gguf-q8_0',quantizer=str(self.quantizer),runner=fake)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][0],str(self.quantizer))
+
 if __name__=='__main__': unittest.main()

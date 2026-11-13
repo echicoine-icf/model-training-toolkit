@@ -734,6 +734,7 @@ def main():
     a.add_argument('project');a.add_argument('version');a.add_argument('--run',required=True)
     a.add_argument('--format',choices=['gguf-q8_0','vllm-fp8','vllm-int8'],required=True)
     a.add_argument('--quantizer',help='Path to llama-quantize(.exe) for GGUF')
+    a.add_argument('--no-auto-build-quantizer',action='store_true',help='Fail instead of building the missing llama.cpp quantizer automatically')
     a.add_argument('--quant-python',help='Separate Python interpreter with llmcompressor for vLLM export')
     a.add_argument('--ollama-model',help='Optional Ollama model tag to register after GGUF Q8_0 conversion')
     a.add_argument('--num-ctx',type=int,default=4096,help='Ollama context length (default 4096)')
@@ -778,7 +779,8 @@ def main():
         elif a.command=='quantize':
             from toolkit.quantization import quantize
             quantize(a.project,a.version,a.run,fmt=a.format,root=ROOT,quantizer=a.quantizer,
-                     quant_python=a.quant_python,dry_run=a.dry_run,ollama_model=a.ollama_model,num_ctx=a.num_ctx)
+                     quant_python=a.quant_python,dry_run=a.dry_run,ollama_model=a.ollama_model,num_ctx=a.num_ctx,
+                     auto_build_quantizer=not a.no_auto_build_quantizer)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)
