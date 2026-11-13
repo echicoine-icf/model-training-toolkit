@@ -32,32 +32,79 @@ def _file_manifest(folder: Path) -> dict:
     }
 
 def _available_quantizers(root: Path):
-    base = root / 'tools' / 'llama.cpp' / 'build' / 'bin'
-    for rel in ('llama-quantize.exe', 'Release/llama-quantize.exe',
-                'llama-quantize', 'Release/llama-quantize'):
-        yield base / rel
+    """Common llama.cpp build locations on Linux, Windows/MSVC and Ninja."""
     base = root / 'tools' / 'llama.cpp'
-    for rel in ('build/Release/bin/llama-quantize.exe', 'llama-quantize.exe'):
-        yield base / rel
+    for build in (base / 'build' / 'mtt-quantize', base / 'build'):
+        for rel in ('bin/Release/llama-quantize.exe', 'bin/llama-quantize.exe',
+                    'bin/llama-quantize', 'bin/Release/llama-quantize',
+                    'Release/bin/llama-quantize.exe', 'Release/llama-quantize.exe',
+                    'llama-quantize.exe', 'llama-quantize'):
+            yield build / rel
+    yield base / 'llama-quantize.exe'
 
-def _quantizer_path(root: Path, custom: str | None) -> Path:
+
+def _find_quantizer(root: Path, custom: str | None) -> Path | None:
     if custom:
         p = Path(custom).expanduser().resolve()
         if not p.is_file():
-            raise FileNotFoundError(f'Quantizer not found: {p}')
+            raise FileNotFoundError(f'Explicit --quantizer not found: {p}')
         return p
     for p in _available_quantizers(root):
         if p.is_file():
             return p.resolve()
     found = shutil.which('llama-quantize') or shutil.which('llama-quantize.exe')
-    if found:
-        return Path(found).resolve()
-    raise FileNotFoundError('llama-quantize executable not found. Build llama.cpp quantize tool or pass --quantizer PATH.')
+    return Path(found).resolve() if found else None
+
+
+def _quantizer_build_commands(root: Path) -> list[list[str]]:
+    source = root / 'tools' / 'llama.cpp'
+    if not (source / 'CMakeLists.txt').is_file():
+        raise FileNotFoundError(
+            f'llama.cpp CMake source missing: {source}. '
+            'Restore the existing llama.cpp checkout or pass --quantizer PATH.')
+    build = source / 'build' / 'mtt-quantize'
+    return [
+        ['cmake', '-S', str(source), '-B', str(build),
+         '-DGGML_CUDA=OFF', '-DLLAMA_BUILD_TESTS=OFF',
+         '-DCMAKE_BUILD_TYPE=Release'],
+        ['cmake', '--build', str(build), '--config', 'Release',
+         '--target', 'llama-quantize', '--parallel', '8'],
+    ]
+
+
+def _build_quantizer(root: Path, commands: list[list[str]], runner) -> Path:
+    if not shutil.which('cmake'):
+        raise RuntimeError(
+            'llama-quantize is missing and CMake is not on PATH. '
+            'Install CMake and a C++ toolchain (on Windows: Visual Studio '
+            'Build Tools with Desktop development with C++), then retry; '
+            'or provide --quantizer PATH. No model files were changed.')
+    print('QUANTIZER NOT FOUND: building the CPU-only llama-quantize utility automatically.', flush=True)
+    for cmd in commands:
+        print('QUANTIZER BUILD:', ' '.join(cmd), flush=True)
+        try:
+            runner(cmd, check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(
+                'Automatic llama-quantize build failed. Check the CMake error above '
+                'and ensure a C++ compiler is installed and available (Windows: '
+                'Visual Studio Build Tools / Developer Command Prompt). '
+                'You can also pass --quantizer PATH or '
+                '--no-auto-build-quantizer. No model files were changed.') from exc
+    result = _find_quantizer(root, None)
+    if result is None:
+        raise RuntimeError(
+            'CMake reported success but llama-quantize executable was not found. '
+            f'Inspect {root / "tools" / "llama.cpp" / "build" / "mtt-quantize"} '
+            'or pass --quantizer PATH. No model files were changed.')
+    print('QUANTIZER READY:', result, flush=True)
+    return result
 
 def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
              quantizer: str | None = None, quant_python: str | None = None,
              dry_run: bool = False, ollama_model: str | None = None,
-             num_ctx: int = 4096, runner=subprocess.run) -> dict:
+             num_ctx: int = 4096, auto_build_quantizer: bool = True,
+             runner=subprocess.run) -> dict:
     """Export separate quantized artifacts; never alter original run/model files.
 
     runner is injectable to unit-test subprocess orchestration without GPU/tools.
@@ -86,10 +133,19 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         raise FileNotFoundError(f'Missing merged Safetensors files in {source}')
     if dest.exists():
         raise FileExistsError(f'Quantized export already exists; refusing overwrite: {dest}')
+    build_commands = []
     if is_gguf:
-        engine = _quantizer_path(root, quantizer)
+        engine = _find_quantizer(root, quantizer)
+        if engine is None:
+            if not auto_build_quantizer:
+                raise FileNotFoundError(
+                    'llama-quantize executable not found. Auto-build is disabled; '
+                    'build it manually or pass --quantizer PATH.')
+            build_commands = _quantizer_build_commands(root)
         source_digest = _sha256(source)
-        cmd = [str(engine), str(source), str(dest), 'Q8_0']
+        # A dry run must plan missing builds without executing CMake.
+        tool_name = str(engine) if engine else '<llama-quantize: resolved after automatic CMake build>'
+        cmd = [tool_name, str(source), str(dest), 'Q8_0']
     else:
         if not quant_python:
             raise ValueError('FP8/INT8 export requires --quant-python pointing to a separate environment with llmcompressor. Do not install it in MTT .venv.')
@@ -118,6 +174,8 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
         'input': str(source), 'output': str(dest), 'source_integrity': source_digest,
         'command': cmd, 'ollama_model': ollama_model,
     }
+    if build_commands:
+        result['quantizer_auto_build_commands'] = build_commands
     if dry_run:
         print('QUANTIZATION PLAN', json.dumps(result, indent=2))
         return result
@@ -126,6 +184,11 @@ def quantize(project: str, version: str, run: str, *, fmt: str, root: Path,
     tmp = dest.with_name(dest.name + '.partial')
     if tmp.exists():
         raise FileExistsError(f'Partial export exists, inspect before retrying: {tmp}')
+    if build_commands:
+        engine = _build_quantizer(root, build_commands, runner)
+        cmd[0] = str(engine)
+        result['command'] = cmd
+        result['quantizer_binary_sha256'] = _sha256(engine)
     work_cmd = [str(tmp) if part == str(dest) else part for part in cmd]
     try:
         runner(work_cmd, check=True)

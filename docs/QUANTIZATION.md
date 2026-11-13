@@ -34,8 +34,15 @@ bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
 ```
 
 The toolkit locates llama.cpp's built `llama-quantize.exe` / `llama-quantize`.
-If you have only the source checkout, build llama.cpp's quantizer first and use
-`--quantizer /path/to/llama-quantize.exe`. The F16 GGUF must already exist;
+**If missing, a normal (non-`--dry-run`) Q8_0 export automatically runs CMake**
+to configure and build the CPU-only quantizer in the ignored
+`tools/llama.cpp/build/mtt-quantize/` directory, then uses it immediately.
+A `--dry-run` shows the build commands without compiling anything.
+CMake and a working C++ toolchain must already be installed; on Windows, use
+Visual Studio Build Tools with the *Desktop development with C++* workload.
+If you prefer a manually built utility, pass `--quantizer PATH`; use
+`--no-auto-build-quantizer` to require an existing binary and fail otherwise.
+The F16 GGUF must already exist;
 if absent, first convert the `exports/merged_hf` model to F16 GGUF (see standard
 llama.cpp conversion instructions). **Do not rerun the LoRA merge** when the
 merged SafeTensors already exists.
