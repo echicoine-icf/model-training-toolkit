@@ -13,7 +13,7 @@ from toolkit.data_package import initialize, inspect, validate_package, assistan
 from toolkit import workspace_state
 
 
-PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|shared-eval VERSION --run ID --benchmark NAME|status|handoff}\' ;;\nesac\n'
+PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n quantize) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh quantize VERSION --run RUN_ID --format FORMAT\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" quantize "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|quantize VERSION --run ID --format FORMAT|shared-eval VERSION --run ID --benchmark NAME|status|handoff}\' ;;\nesac\n'
 
 def scaffold_project_launcher(dest):
     dest=Path(dest)
@@ -29,7 +29,7 @@ def project_new(name):
     dest=project_path(name)
     require(not dest.exists(),f'Project exists: {name}')
     (dest/'versions').mkdir(parents=True)
-    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.4.0'})
+    write(dest/'project.json',{'name':name,'created_utc':utc(),'description':'Set project description here','toolkit_version':'0.4.1'})
     (dest/'PROJECT_NOTES.md').write_text('# Project Notes\n\nDescribe goals, schema assumptions, open decisions, and evaluation contract.\n',encoding='utf-8')
     # Project-local entrypoint, independent of current working directory and active venv.
     scaffold_project_launcher(dest)
@@ -171,7 +171,7 @@ def new_run(project,version,*,training_overrides=None,base_override=None):
         hashes=read(snap/'input_hashes.json')
         hashes['version.json']=digest(snap/'version.json')
         write(snap/'input_hashes.json',hashes)
-    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.4.0','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
+    meta={'run_id':run_id,'project':project,'version':version,'created_utc':utc(),'status':'prepared','toolkit_version':'0.4.1','initialization':'fresh_base','run_kind':'training','training_overrides':training_overrides or {}}
     write(folder/'run.json',meta)
     return folder,meta
 
@@ -654,7 +654,7 @@ def handoff(project):
 
 
 def main():
-    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.4.0')
+    p=argparse.ArgumentParser(prog='workspace.sh',description='Model Training Toolkit 0.4.1')
     sub=p.add_subparsers(dest='command',required=True)
     a=sub.add_parser('doctor');a.add_argument('--repair',action='store_true',help='Repair only validated workspace state metadata (with backup)')
     sub.add_parser('upgrade')
@@ -730,6 +730,14 @@ def main():
     a.add_argument('--num-predict',type=int)
     a.add_argument('--seed',type=int)
     a.add_argument('--timeout',type=int)
+    a=sub.add_parser('quantize',help='Non-destructive GGUF Q8_0 or vLLM FP8/INT8 export')
+    a.add_argument('project');a.add_argument('version');a.add_argument('--run',required=True)
+    a.add_argument('--format',choices=['gguf-q8_0','vllm-fp8','vllm-int8'],required=True)
+    a.add_argument('--quantizer',help='Path to llama-quantize(.exe) for GGUF')
+    a.add_argument('--quant-python',help='Separate Python interpreter with llmcompressor for vLLM export')
+    a.add_argument('--ollama-model',help='Optional Ollama model tag to register after GGUF Q8_0 conversion')
+    a.add_argument('--num-ctx',type=int,default=4096,help='Ollama context length (default 4096)')
+    a.add_argument('--dry-run',action='store_true')
     a=sub.add_parser('export');a.add_argument('project');a.add_argument('version');a.add_argument('--run');a.add_argument('--format',choices=['hf','gguf'],default='hf')
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
     a=sub.add_parser('runs');a.add_argument('--project')
@@ -767,6 +775,10 @@ def main():
                         audit_only=a.audit_only,gate_only=a.gate_only,
                         reference_results=a.reference_results,url=a.url,num_ctx=a.num_ctx,
                         num_predict=a.num_predict,seed=a.seed,timeout=a.timeout,workspace=ROOT)
+        elif a.command=='quantize':
+            from toolkit.quantization import quantize
+            quantize(a.project,a.version,a.run,fmt=a.format,root=ROOT,quantizer=a.quantizer,
+                     quant_python=a.quant_python,dry_run=a.dry_run,ollama_model=a.ollama_model,num_ctx=a.num_ctx)
         elif a.command=='export':export_model(a.project,a.version,a.run,a.format)
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)
