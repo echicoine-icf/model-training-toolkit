@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 def model_digest(receipt: Path) -> str:
     data = json.loads(receipt.read_text(encoding='utf-8'))
-    if data.get('format') not in ('vllm-fp8', 'vllm-int8'):
+    if data.get('format') not in ('vllm-fp8', 'vllm-int8', 'vllm-w4a16'):
         raise ValueError('Receipt is not for an MTT vLLM quantized model')
     files = data.get('output_integrity')
     if not isinstance(files, dict) or not any(k.endswith('.safetensors') for k in files):
@@ -36,6 +36,23 @@ def model_digest(receipt: Path) -> str:
         if h.hexdigest()!=info['sha256']:
             raise ValueError('Quantized model checksum mismatch: ' + name)
     return hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def unquantized_model_digest(folder: Path) -> str:
+    """Stable identity for uncompressed merged SafeTensors (F16/BF16 baseline)."""
+    root = folder.resolve()
+    if not (root / 'config.json').is_file() or not list(root.glob('*.safetensors')):
+        raise ValueError('F16/BF16 baseline requires merged Hugging Face config and SafeTensors')
+    h = hashlib.sha256()
+    for path in sorted(root.rglob('*')):
+        if path.is_symlink():
+            raise ValueError(f'Cannot validate symlink in baseline: {path}')
+        if path.is_file():
+            h.update(path.relative_to(root).as_posix().encode('utf-8'))
+            with path.open('rb') as f:
+                for block in iter(lambda: f.read(1024*1024), b''):
+                    h.update(block)
+    return h.hexdigest()
 
 
 def handler_factory(model_name: str, model_hash: str, api_base: str, max_context: int):
@@ -97,15 +114,17 @@ def handler_factory(model_name: str, model_hash: str, api_base: str, max_context
 def main():
     p=argparse.ArgumentParser(description='Loopback-only vLLM-to-Ollama evaluation API bridge')
     p.add_argument('--model',required=True,help='vLLM --served-model-name')
-    p.add_argument('--receipt',required=True,help='Quantized model MTT_QUANTIZATION.json')
+    model_source=p.add_mutually_exclusive_group(required=True)
+    model_source.add_argument('--receipt',help='Quantized model MTT_QUANTIZATION.json')
+    model_source.add_argument('--model-dir',help='Unquantized merged HF model folder for F16/BF16 baseline')
     p.add_argument('--vllm-url',default='http://127.0.0.1:8000')
     p.add_argument('--port',type=int,default=11435)
     p.add_argument('--max-context',type=int,default=4096)
     args=p.parse_args()
     if args.port<=0 or args.port>65535 or args.max_context<512:
         p.error('Invalid local port or maximum context length')
-    receipt=Path(args.receipt).resolve()
-    hash=model_digest(receipt)
+    hash=(model_digest(Path(args.receipt).resolve()) if args.receipt else
+          unquantized_model_digest(Path(args.model_dir).resolve()))
     server=ThreadingHTTPServer(('127.0.0.1',args.port),
                    handler_factory(args.model,hash,args.vllm_url,args.max_context))
     print(f'VLLM EVAL BRIDGE 127.0.0.1:{args.port} model={args.model} digest={hash}',flush=True)
