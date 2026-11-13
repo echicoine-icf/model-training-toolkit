@@ -17,7 +17,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 FORMATS = {'hf-f16': 'merged_hf', 'vllm-fp8': 'vllm-fp8',
-           'vllm-int8': 'vllm-int8', 'vllm-w4a16': 'vllm-w4a16'}
+           'vllm-int8': 'vllm-int8', 'vllm-w4a16': 'vllm-w4a16',
+           'vllm-w2a16': 'vllm-w2a16'}
 AWS_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$')
 
 
@@ -57,7 +58,7 @@ def validate_checkpoint(folder, require_receipt=False):
         record = json.loads(receipt.read_text(encoding='utf-8'))
         if record.get('output_integrity') != manifest:
             raise ValueError('Quantized checkpoint differs from its original MTT receipt')
-        if record.get('format') not in ('vllm-fp8', 'vllm-int8', 'vllm-w4a16'):
+        if record.get('format') not in ('vllm-fp8', 'vllm-int8', 'vllm-w4a16', 'vllm-w2a16'):
             raise ValueError('Not a recognized vLLM quantization receipt')
         config = json.loads((folder / 'config.json').read_text(encoding='utf-8'))
         if not config.get('quantization_config'):

@@ -64,6 +64,32 @@ class SageMakerVllmTests(unittest.TestCase):
                                  self.root / 'eli-int4.tar.gz')
         self.assertEqual(artifact['format'], 'vllm-w4a16')
 
+    def test_vllm_w2a16_experimental_roundtrip_and_integrity(self):
+        plan = quantize('eli', 'v9.2', 'run_fake', root=self.root, fmt='vllm-w2a16',
+                        quant_python=str(self.external), dry_run=True,
+                        runner=lambda *_a, **_k: self.fail('dry run executed'))
+        self.assertEqual(plan['command'][-1], 'W2A16')
+        self.assertEqual(plan['output'], str(self.base/'vllm-w2a16'))
+        self.assertIn('experimental', plan['serving_compatibility'])
+        def fake(cmd, check):
+            out = Path(cmd[cmd.index('--output') + 1])
+            out.mkdir()
+            (out/'config.json').write_text(json.dumps({
+                'quantization_config': {'method': 'compressed-tensors', 'bits': 2}}))
+            (out/'model.safetensors').write_bytes(b'test 2bit checkpoint')
+        result = quantize('eli', 'v9.2', 'run_fake', root=self.root,
+                          fmt='vllm-w2a16', quant_python=str(self.external), runner=fake)
+        self.assertEqual(result['format'], 'vllm-w2a16')
+        destination = model_path(self.root, 'eli', 'v9.2', 'run_fake', 'vllm-w2a16')
+        self.assertTrue((destination/'MTT_QUANTIZATION.json').exists())
+        self.assertEqual(len(model_digest(destination/'MTT_QUANTIZATION.json')), 64)
+        artifact = package_model(self.root, 'eli', 'v9.2', 'run_fake', 'vllm-w2a16',
+                                 self.root/'eli-int2.tar.gz')
+        self.assertEqual(artifact['format'], 'vllm-w2a16')
+        (destination/'model.safetensors').write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError, 'differs from'):
+            validate_checkpoint(destination, require_receipt=True)
+
     def test_rejects_tampered_quantized_export(self):
         self.test_vllm_w4a16_plan_and_receipt()
         (self.base / 'vllm-w4a16' / 'model.safetensors').write_bytes(b'changed')

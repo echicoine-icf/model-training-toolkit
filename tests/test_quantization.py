@@ -31,6 +31,40 @@ class QuantizationTests(unittest.TestCase):
     def runq(self,**kw):
         return quantize('eli','v9.2',self.run,root=self.root,**kw)
 
+    def test_gguf_q2_k_end_to_end_and_no_overwrite(self):
+        seen = []
+        def fake(cmd, check):
+            seen.append(cmd)
+            Path(cmd[2]).write_bytes(b'GGUF quantized Q2_K')
+        plan = self.runq(fmt='gguf-q2_k', quantizer=str(self.quantizer),
+                         ollama_model='datmm-eli:v9.2-q2', dry_run=True,
+                         runner=lambda *_a, **_kw: self.fail('dry-run executed'))
+        self.assertEqual(plan['command'][-1], 'Q2_K')
+        self.assertEqual(plan['output'], str(self.exports/'model-q2_k.gguf'))
+        result = self.runq(fmt='gguf-q2_k', quantizer=str(self.quantizer),
+                           runner=fake)
+        self.assertEqual(seen[0][-1], 'Q2_K')
+        self.assertTrue((self.exports/'model-q2_k.gguf').is_file())
+        self.assertTrue((self.exports/'model-q2_k.mtt-quantization.json').is_file())
+        self.assertEqual((self.exports/'model-f16.gguf').read_bytes(), b'GGUF abcdefghi')
+        self.assertEqual(result['format'], 'gguf-q2_k')
+        with self.assertRaises(FileExistsError):
+            self.runq(fmt='gguf-q2_k', quantizer=str(self.quantizer), runner=fake)
+
+    def test_gguf_q2_k_ollama_registration(self):
+        seen = []
+        def fake(cmd, check):
+            seen.append(cmd)
+            if cmd[0] != 'ollama':
+                Path(cmd[2]).write_bytes(b'GGUF quantized Q2_K')
+        result = self.runq(fmt='gguf-q2_k', quantizer=str(self.quantizer),
+                           ollama_model='datmm-eli:v9.2-q2', runner=fake)
+        self.assertEqual(seen[0][-1], 'Q2_K')
+        self.assertEqual(seen[1][:3], ['ollama', 'create', 'datmm-eli:v9.2-q2'])
+        self.assertIn('model-q2_k.gguf',
+                      (self.exports/'Modelfile.q2_k').read_text())
+        self.assertEqual(result['ollama_created'], 'datmm-eli:v9.2-q2')
+
     def test_gguf_q8_provenance_and_no_overwrite(self):
         captured=[]
         def fake(cmd,check):

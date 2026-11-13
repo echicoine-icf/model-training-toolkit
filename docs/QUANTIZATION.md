@@ -10,8 +10,11 @@ past evaluations. Each format writes its own artifact and hash receipt.
 |---|---|---|---|---|
 | `gguf-q8_0` | `exports/model-f16.gguf` | `exports/model-q8_0.gguf` | Ollama / llama.cpp | 8-bit comparison against the existing shared benchmark |
 | `gguf-q4_k_m` | `exports/model-f16.gguf` | `exports/model-q4_k_m.gguf` | Ollama / llama.cpp | Lower-memory 4-bit comparison using Q4_K_M |
+| `gguf-q2_k` | `exports/model-f16.gguf` | `exports/model-q2_k.gguf` | Ollama / llama.cpp | Experimental ~2–3 bpw Q2_K accuracy check |
 | `vllm-fp8` | `exports/merged_hf/` | `exports/vllm-fp8/` | vLLM + compatible CUDA GPU | 8-bit float weights/activations; data-free FP8_DYNAMIC |
 | `vllm-int8` | `exports/merged_hf/` | `exports/vllm-int8/` | vLLM compatible deployment | Experimental 8-bit integer **weight-only** W8A16; not an INT8 W8A8 activation path |
+| `vllm-w4a16` | `exports/merged_hf/` | `exports/vllm-w4a16/` | vLLM (validation required) | Weight-only 4-bit RTN |
+| `vllm-w2a16` | `exports/merged_hf/` | `exports/vllm-w2a16/` | vLLM (experimental; GPU/backend compatibility unverified) | Weight-only 2-bit RTN, 16-bit activations |
 
 **GGUF Q8_0 is not a vLLM FP8 or INT8 checkpoint.** Quantize the HF model
 separately for vLLM deployment. FP8 vs BF16 latency/concurrency must be tested
@@ -210,3 +213,45 @@ Q8 using the same benchmark version and decoding settings. GGUF Q4_K_M is a
 ## Production vLLM / SageMaker path
 
 MTT also supports `vllm-w4a16`: weight-only 4-bit **W4A16 RTN** compressed SafeTensors created from `exports/merged_hf/` with `--quant-python`. This is separate from GGUF Q4_K_M and must pass semantic validation independently. For the F16/FP8/INT8/INT4 SafeTensors-to-S3 packaging, a persistent SageMaker vLLM endpoint, and concurrency autoscaling, see [SageMaker vLLM deployment](SAGEMAKER_VLLM.md). No extra release or installation handoff files are used.
+
+## Experimental 2-bit ELI V9.2 exports
+
+Both exports start independently from the **original F16 artifact**. Do not
+quantize the existing Q4 or Q8 file again. GGUF Q2_K is the straightforward
+llama.cpp route; it uses somewhat more than 2 bits per weight after block
+overhead. The W2A16 SafeTensors format is generated with LLM Compressor's
+`W2A16` scheme (2-bit **weights**, 16-bit activations). This is **not** a
+guarantee that your selected SageMaker vLLM image/GPU supports the required
+2-bit compute kernel. Model creation, packaging and loading are distinct tests.
+
+```bash
+cd ~/model-training-toolkit
+RUN=run_20261109T002925408171Z_a4a5de
+
+# Local Ollama model: no isolated Python environment needed
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format gguf-q2_k --ollama-model datmm-eli:v9.2-q2 --dry-run
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format gguf-q2_k --ollama-model datmm-eli:v9.2-q2
+
+# Full shared benchmark: identical suite/scorer to F16/Q8/Q4
+bash projects/eli/project.sh shared-eval v9.2 --run "$RUN" \
+  --benchmark benchmark-v1.0.2 --model datmm-eli:v9.2-q2 \
+  --stage all --resume
+
+# Production-format experiment: isolated llmcompressor Python interpreter
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format vllm-w2a16 --quant-python /path/to/isolated/python --dry-run
+bash projects/eli/project.sh quantize v9.2 --run "$RUN" \
+  --format vllm-w2a16 --quant-python /path/to/isolated/python
+```
+
+Before selecting W2A16 for an always-on endpoint, **actually start vLLM**
+with the exported `vllm-w2a16` directory using the exact pinned container
+image and instance type planned for SageMaker. Failure to load is possible
+even if LLM Compressor wrote a valid checkpoint. Only then use the existing
+`vllm_eval_bridge.py` receipt and shared benchmark to check accuracy.
+
+Upstream references: [llama.cpp quantize types](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/quantize.cpp),
+[LLM Compressor compression schemes](https://docs.vllm.ai/projects/llm-compressor/en/latest/guides/compression_schemes/),
+[vLLM supported quantization formats](https://docs.vllm.ai/en/latest/features/quantization/).
