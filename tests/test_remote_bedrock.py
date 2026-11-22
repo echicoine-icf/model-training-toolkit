@@ -1,4 +1,5 @@
 """No AWS account, keys, GPU, external benchmark package, or model training needed."""
+import argparse
 import contextlib
 import io
 import json
@@ -108,7 +109,7 @@ class BedrockTests(unittest.TestCase):
             remote.protected_files(self.root,'eli',['benchmark-v1.0.2']),**kw)
 
     def submitted(self):
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return remote.submit(self.root,'eli','v10',self.data,self.v/'data/system_prompt.txt',
                 benchmark_names=['benchmark-v1.0.2'],apply=True,factory=SessionFactory)
 
@@ -120,6 +121,21 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(cfg['region'],'us-east-1')
         self.assertEqual(cfg['profile'],'nlm-account')
         self.assertEqual(remote.aws_session(cfg,SessionFactory).region_name,'us-east-1')
+
+    def test_version_init_accepts_explicit_base_model(self):
+        cli = argparse.ArgumentParser()
+        remote.add_arguments(cli.add_subparsers(required=True))
+        model_id = 'amazon.nova-lite-v1:0:300k'
+        args = cli.parse_args(['remote', 'version', 'init', 'eli', 'v11', '--base-model-id', model_id])
+        with contextlib.redirect_stdout(io.StringIO()):
+            remote.dispatch(args, root=self.root)
+        version_path = self.project / 'versions/v11/version.json'
+        version = core.read(version_path)
+        self.assertEqual(version['base_model']['id'], model_id)
+        self.assertEqual(version['remote']['bedrock']['base_model_id'], model_id)
+        with self.assertRaises(FileExistsError):
+            remote.dispatch(args, root=self.root)
+        self.assertEqual(core.read(version_path), version)
 
     def test_secrets_rejected_and_redacted(self):
         cfg=core.read(self.v/'version.json')
@@ -159,6 +175,24 @@ class BedrockTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'overlap'):self.preflight()
         self.assertFalse((self.root/'runs').exists())
 
+    def test_preflight_allows_only_manifest_declared_empty_suites(self):
+        manifest_file = self.benchmark / 'benchmark_manifest.json'
+        manifest = core.read(manifest_file)
+        relative = 'cases/empty.jsonl'
+        empty = self.benchmark / relative
+        empty.write_text('', encoding='utf-8')
+        manifest['suites'].append({'name':'empty','dataset':relative,'count':0,'mode':'diagnostic'})
+        manifest['frozen_files_sha256'][relative] = core.digest(empty)
+        core.write(manifest_file, manifest)
+
+        self.preflight()
+        with self.assertRaisesRegex(ValueError, 'Empty protected question set'):
+            remote.extract_questions(empty)
+        manifest['suites'][-1]['count'] = 1
+        core.write(manifest_file, manifest)
+        with self.assertRaisesRegex(ValueError, 'Empty protected question set'):
+            self.preflight()
+
     def test_protected_hash_mismatch(self):
         self.case.write_text(json.dumps({'question':'Something else'})+'\n',encoding='utf-8')
         with self.assertRaisesRegex(ValueError,'hash mismatch'):
@@ -177,6 +211,38 @@ class BedrockTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse((self.root/'runs').exists())
 
+    def test_nova_2_lite_preflight_skips_count_tokens_and_reports_unverified(self):
+        for base_model_id in (
+            remote.DEFAULT_MODEL,
+            f'arn:aws:bedrock:us-east-1::foundation-model/{remote.DEFAULT_MODEL}',
+        ):
+            with self.subTest(base_model_id=base_model_id):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    remote.submit(self.root,'eli','v10',self.data,self.v/'data/system_prompt.txt',
+                        benchmark_names=['benchmark-v1.0.2'],factory=SessionFactory,
+                        overrides={'base_model_id':base_model_id,'count_model_id':'us.amazon.nova-2-lite-v1:0'})
+                self.assertIn('"token_validation": "not-verified"',output.getvalue())
+                self.assertIn('does not support Bedrock Runtime CountTokens',output.getvalue())
+        self.assertEqual(SessionFactory.runtime.requests,[])
+        self.assertEqual(SessionFactory.bedrock.created,[])
+        self.assertFalse((self.root/'runs').exists())
+
+    def test_other_model_still_checks_tokens_and_rejects_offline_submit(self):
+        overrides = {'base_model_id':'amazon.nova-lite-v1:0:300k',
+                     'count_model_id':'amazon.nova-lite-v1:0'}
+        with contextlib.redirect_stdout(io.StringIO()):
+            remote.submit(self.root,'eli','v10',self.data,self.v/'data/system_prompt.txt',
+                benchmark_names=['benchmark-v1.0.2'],factory=SessionFactory,overrides=overrides)
+        self.assertEqual([request['modelId'] for request in SessionFactory.runtime.requests],
+                         ['amazon.nova-lite-v1:0'] * 8)
+        self.assertEqual(SessionFactory.bedrock.created,[])
+        with self.assertRaisesRegex(ValueError,'offline preflight'):
+            remote.submit(self.root,'eli','v10',self.data,self.v/'data/system_prompt.txt',
+                benchmark_names=['benchmark-v1.0.2'],factory=SessionFactory,overrides=overrides,
+                skip_token_check=True,apply=True)
+        self.assertFalse((self.root/'runs').exists())
+
     def test_training_submit_and_provenance(self):
         rid=self.submitted()
         state=remote.load_state(remote.remote_run_dir(self.root,'eli','v10',rid),'train')
@@ -186,7 +252,11 @@ class BedrockTests(unittest.TestCase):
         self.assertNotIn('aws_secret_access_key',json.dumps(state))
         self.assertTrue(state['training_s3_uri'].endswith(core.digest(self.data)+'.jsonl'))
         self.assertEqual(core.assert_snapshot(self.root/'runs/eli/v10'/rid/'input')['data/bedrock_training.jsonl'],core.digest(self.data))
-        self.assertEqual(len(SessionFactory.runtime.requests),8)
+        self.assertEqual(SessionFactory.runtime.requests,[])
+        self.assertEqual(SessionFactory.bedrock.created[0]['baseModelIdentifier'],remote.DEFAULT_MODEL)
+        self.assertEqual(state['base_model_id'],remote.DEFAULT_MODEL)
+        self.assertEqual(state['token_validation'],'not-verified')
+        self.assertIn('does not support',state['token_validation_reason'])
 
     def test_duplicate_submission_protected(self):
         self.submitted()

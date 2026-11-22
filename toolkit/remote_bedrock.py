@@ -22,7 +22,8 @@ from typing import Any
 from . import core
 
 FORMAT = 'mtt-bedrock-nova-sft-v1'
-DEFAULT_MODEL = 'amazon.nova-2-lite-v1:0:256k'
+NOVA_2_LITE_RUNTIME_MODEL = 'amazon.nova-2-lite-v1:0'
+DEFAULT_MODEL = NOVA_2_LITE_RUNTIME_MODEL + ':256k'
 RESERVED = ('User:', 'Bot:', 'Assistant:', 'System:', '<image>', '<video>', '[EOS]')
 TERMINAL_TRAIN = frozenset({'Completed', 'Failed', 'Stopped'})
 TERMINAL_DEPLOY = frozenset({'Active', 'Failed'})
@@ -179,7 +180,7 @@ def training_questions(data: Path, prompt: str, *, count_tokens=None, model_id=N
             'token_validation':'bedrock-count-tokens' if count_tokens else 'not-verified'}
 
 
-def extract_questions(path):
+def extract_questions(path, *, allow_empty=False):
     """Fail closed on unknown protected formats, never mark them validated silently."""
     path = Path(path)
     text = path.read_text(encoding='utf-8-sig')
@@ -213,7 +214,8 @@ def extract_questions(path):
             if isinstance(value.get(key), list): walk(value[key]);return
         raise ValueError(f'Cannot locate question field in protected dataset {path}; add a supported extractor before submission')
     walk(data)
-    if not found:raise ValueError(f'Empty protected question set: {path}')
+    if not found and not (allow_empty and data == []):
+        raise ValueError(f'Empty protected question set: {path}')
     return found
 
 
@@ -228,12 +230,16 @@ def protected_files(root, project, benchmark_names=(), extra_paths=()):
         obj=core.read(manifest)
         hashes=obj.get('frozen_files_sha256')
         if not isinstance(hashes, dict) or not hashes: raise ValueError(f'Missing protected hashes: {manifest}')
+        suites = [s for s in obj.get('suites', []) + obj.get('targeted_suites', []) if isinstance(s, dict)]
+        datasets = {s.get('dataset') for s in suites}
+        declared_empty = {s.get('dataset') for s in suites if type(s.get('count')) is int and s['count'] == 0}
+        declared_empty -= {s.get('dataset') for s in suites if type(s.get('count')) is not int or s['count'] != 0}
         for relative, expected in hashes.items():
             f=(folder/relative).resolve()
             if not f.is_relative_to(folder.resolve()) or not f.is_file() or f.is_symlink():raise ValueError(f'Unsafe benchmark file: {relative}')
             if core.digest(f)!=expected:raise ValueError(f'Protected benchmark hash mismatch: {f}')
-            datasets={s.get('dataset') for s in (obj.get('suites',[])+obj.get('targeted_suites',[])) if isinstance(s,dict)}
-            records.append({'path':str(f),'sha256':expected,'benchmark':name,'is_dataset':relative in datasets})
+            records.append({'path':str(f),'sha256':expected,'benchmark':name,'is_dataset':relative in datasets,
+                            'allow_empty':relative in declared_empty})
         records.append({'path':str(manifest),'sha256':core.digest(manifest),'benchmark':name,'manifest':True})
     for item in extra_paths:
         f=Path(item).expanduser().resolve()
@@ -257,7 +263,7 @@ def preflight(data, prompt_file, protected, *, count_tokens=None, count_model_id
         path=entry['path']
         if core.digest(path)!=entry['sha256']:
             raise ValueError(f'Protected input changed: {path}')
-        questions=extract_questions(path)
+        questions=extract_questions(path,allow_empty=entry.get('allow_empty',False))
         intersection=questions & train
         if intersection:overlaps[path]=len(intersection)
     if overlaps:raise ValueError('Training/protected evaluation question overlap: '+json.dumps(overlaps))
@@ -318,14 +324,17 @@ def run_meta(folder, status=None):
     return m
 
 
-def ensure_version(root, project, version):
+def ensure_version(root, project, version, *, base_model_id=DEFAULT_MODEL):
     """One-time remote version creation; never edits an existing ELI version."""
+    if not base_model_id.strip():
+        raise ValueError('Bedrock base model ID must not be blank')
+    base_model_id = base_model_id.strip()
     v=version_location(root,project,version)
     if not (v.parent.parent/'project.json').is_file():raise FileNotFoundError('Create MTT project before remote version initialization')
     if v.exists():raise FileExistsError(f'Existing MTT version must not be changed: {v}')
     (v/'data').mkdir(parents=True,exist_ok=False)
     core.write(v/'version.json',{'project':project,'version':version,'created_utc':core.utc(),'initialization':'remote_customization',
-        'base_model':{'provider':'bedrock','id':DEFAULT_MODEL},'remote':{'bedrock':{'base_model_id':DEFAULT_MODEL}},
+        'base_model':{'provider':'bedrock','id':base_model_id},'remote':{'bedrock':{'base_model_id':base_model_id}},
         'notes':'Remote Bedrock SFT. Configure remote.bedrock and place exact production system prompt in data/system_prompt.txt.'})
     core.write(v/'version_state.json',{'stage':'draft','created_utc':core.utc()})
     return v
@@ -419,14 +428,25 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
            skip_token_check=False, factory=None):
     root=Path(root)
     cfg=load_config(project,version,overrides,root=root)
+    if apply and skip_token_check:
+        raise ValueError('--skip-token-check is only valid for offline preflight')
     protected=protected_files(root,project,benchmark_names,protected_paths)
     dataset=Path(dataset).expanduser().resolve()
     prompt_file=Path(prompt_file).expanduser().resolve()
     bedrock=s3=sts=runtime=region=None
     if apply or not skip_token_check:
         bedrock,s3,sts,runtime,region=clients(cfg,factory)
-    counter=None if skip_token_check else runtime.count_tokens
-    checked,audit=preflight(dataset,prompt_file,protected,count_tokens=counter,count_model_id=(cfg.get('count_model_id') or cfg['base_model_id'].replace(':256k','')))
+    # Nova 2 Lite does not support CountTokens on Bedrock Runtime. Treat the
+    # customization ID and foundation-model ARN identically here.
+    is_nova_2_lite = cfg['base_model_id'].rsplit('/', 1)[-1] in (DEFAULT_MODEL, NOVA_2_LITE_RUNTIME_MODEL)
+    counter = None if skip_token_check or is_nova_2_lite else runtime.count_tokens
+    count_model_id = (cfg.get('count_model_id') or cfg['base_model_id'].replace(':256k', '')) if counter else None
+    checked,audit=preflight(dataset,prompt_file,protected,count_tokens=counter,count_model_id=count_model_id)
+    if is_nova_2_lite:
+        checked['token_validation_reason'] = (
+            'Nova 2 Lite does not support Bedrock Runtime CountTokens. No verified compatible '
+            'offline tokenizer is configured. Bedrock validates the 32K context limit during customization.'
+        )
     if not apply:
         if sts is not None:
             account=sts.get_caller_identity()['Account']
@@ -434,8 +454,8 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
         print('REMOTE TRAIN PREFLIGHT',json.dumps({k:v for k,v in checked.items() if k!='protected_sha256'},indent=2))
         print('No AWS changes (add --apply to submit)')
         return None
-    if checked['token_validation'] != 'bedrock-count-tokens':
-        raise ValueError('Submission requires Nova token validation; do not use --skip-token-check with --apply')
+    if is_nova_2_lite:
+        print(f"WARNING: Token counts are unverified. {checked['token_validation_reason']}", file=sys.stderr)
     if not cfg.get('role_arn'):raise ValueError('Bedrock service role ARN is required')
     if not cfg.get('bucket'):raise ValueError('Bedrock S3 bucket is required')
     identity=sts.get_caller_identity()
@@ -468,6 +488,8 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
             'training_count':checked['count'],'protected_sha256':checked['protected_sha256'],
             'mtt_commit':git_commit(root),'version_config_sha256':core.digest(folder/'input/version.json'),
             'client_request_token':sha((rid+checked['training_file_sha256']).encode())[:48]}
+        if 'token_validation_reason' in checked:
+            state['token_validation_reason'] = checked['token_validation_reason']
         with exclusive(folder,'train'):
             save_state(folder,'train',state)
             try:
@@ -869,7 +891,7 @@ def dispatch(a,root=None):
     root=Path(root or core.ROOT)
     project,version=a.project,a.version
     if a.kind=='version' and a.action=='init':
-        print('REMOTE VERSION',ensure_version(root,project,version));return
+        print('REMOTE VERSION',ensure_version(root,project,version,base_model_id=a.base_model_id));return
     if a.kind=='train':
         if a.action in ('preflight','submit'):
             v=version_location(root,project,version)
@@ -915,6 +937,9 @@ def add_arguments(sub):
         for action in actions:
             a=s.add_parser(action)
             a.add_argument('project');a.add_argument('version')
+            if kind=='version' and action=='init':
+                a.add_argument('--base-model-id', default=DEFAULT_MODEL,
+                               help='Bedrock customization base model ID for this new version')
             if kind!='version' and action not in ('submit','preflight'):
                 a.add_argument('--run',required=True)
             if kind=='deploy' or kind=='eval':
