@@ -25,6 +25,7 @@ from .dataset import rows as dataset_rows
 FORMAT = 'mtt-bedrock-nova-sft-v1'
 NOVA_2_LITE_RUNTIME_MODEL = 'amazon.nova-2-lite-v1:0'
 DEFAULT_MODEL = NOVA_2_LITE_RUNTIME_MODEL + ':256k'
+NOVA_2_LITE_SFT_DEFAULTS = {'epochCount':'2','learningRate':'0.00001','learningRateWarmupSteps':'10'}
 RESERVED = ('User:', 'Bot:', 'Assistant:', 'System:', '<image>', '<video>', '[EOS]')
 TERMINAL_TRAIN = frozenset({'Completed', 'Failed', 'Stopped'})
 TERMINAL_DEPLOY = frozenset({'Active', 'Failed'})
@@ -434,6 +435,31 @@ def job_name(prefix, run_id, suffix=''):
     return (safe+'-'+sha(run_id.encode())[:20]+suffix)[:63]
 
 
+def is_nova_2_lite(model_id):
+    return model_id.rsplit('/', 1)[-1] in (DEFAULT_MODEL, NOVA_2_LITE_RUNTIME_MODEL)
+
+
+def training_hyperparameters(model_id):
+    # Bedrock requires an explicit map for Nova 2 Lite FINE_TUNING jobs.
+    return NOVA_2_LITE_SFT_DEFAULTS.copy() if is_nova_2_lite(model_id) else {}
+
+
+def create_training_job(bedrock, state):
+    request = {
+        'jobName': state['job_name'],
+        'customModelName': state['custom_model_name'],
+        'roleArn': state['role_arn'],
+        'baseModelIdentifier': state['base_model_id'],
+        'customizationType': 'FINE_TUNING',
+        'trainingDataConfig': {'s3Uri': state['training_s3_uri']},
+        'outputDataConfig': {'s3Uri': state['output_s3_uri']},
+        'clientRequestToken': state['client_request_token'],
+    }
+    if state.get('hyperparameters'):
+        request['hyperParameters'] = state['hyperparameters']
+    return bedrock.create_model_customization_job(**request)
+
+
 def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protected_paths=(),run_id=None,overrides=None,apply=False,
            skip_token_check=False, factory=None):
     root=Path(root)
@@ -448,14 +474,15 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
         bedrock,s3,sts,runtime,region=clients(cfg,factory)
     # Nova 2 Lite does not support CountTokens on Bedrock Runtime. Treat the
     # customization ID and foundation-model ARN identically here.
-    is_nova_2_lite = cfg['base_model_id'].rsplit('/', 1)[-1] in (DEFAULT_MODEL, NOVA_2_LITE_RUNTIME_MODEL)
-    counter = None if skip_token_check or is_nova_2_lite else runtime.count_tokens
+    nova_2_lite = is_nova_2_lite(cfg['base_model_id'])
+    counter = None if skip_token_check or nova_2_lite else runtime.count_tokens
     count_model_id = (cfg.get('count_model_id') or cfg['base_model_id'].replace(':256k', '')) if counter else None
     checked,audit=preflight(dataset,prompt_file,protected,count_tokens=counter,count_model_id=count_model_id)
     existing_audit = version_location(root, project, version) / 'data/train.jsonl'
     if existing_audit.exists():
         validate_existing_audit(existing_audit, audit)
-    if is_nova_2_lite:
+    checked['hyperparameters'] = training_hyperparameters(cfg['base_model_id'])
+    if nova_2_lite:
         checked['token_validation_reason'] = (
             'Nova 2 Lite does not support Bedrock Runtime CountTokens. No verified compatible '
             'offline tokenizer is configured. Bedrock validates the 32K context limit during customization.'
@@ -467,7 +494,7 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
         print('REMOTE TRAIN PREFLIGHT',json.dumps({k:v for k,v in checked.items() if k!='protected_sha256'},indent=2))
         print('No AWS changes (add --apply to submit)')
         return None
-    if is_nova_2_lite:
+    if nova_2_lite:
         print(f"WARNING: Token counts are unverified. {checked['token_validation_reason']}", file=sys.stderr)
     if not cfg.get('role_arn'):raise ValueError('Bedrock service role ARN is required')
     if not cfg.get('bucket'):raise ValueError('Bedrock S3 bucket is required')
@@ -496,7 +523,7 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
             'account_id':account,'profile':cfg.get('profile'),'region':region,'base_model_id':cfg['base_model_id'],
             'job_name':job_name(cfg['model_prefix'],rid), 'custom_model_name':job_name(cfg['model_prefix'],rid,'-model'),
             'training_s3_uri':train_uri,'output_s3_uri':out_uri,'role_arn':cfg['role_arn'],
-            'hyperparameters':{},'training_file_sha256':checked['training_file_sha256'],
+            'hyperparameters':checked['hyperparameters'],'training_file_sha256':checked['training_file_sha256'],
             'system_prompt_sha256':checked['system_prompt_sha256'],'token_validation':checked['token_validation'],
             'training_count':checked['count'],'protected_sha256':checked['protected_sha256'],
             'mtt_commit':git_commit(root),'version_config_sha256':core.digest(folder/'input/version.json'),
@@ -508,11 +535,7 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
             try:
                 immutable_put(s3,folder/'input/data/bedrock_training.jsonl',train_uri,checked['training_file_sha256'])
                 state['status']='Staged';state['staged_utc']=core.utc();save_state(folder,'train',state)
-                resp=bedrock.create_model_customization_job(
-                    jobName=state['job_name'],customModelName=state['custom_model_name'],
-                    roleArn=cfg['role_arn'],baseModelIdentifier=cfg['base_model_id'],customizationType='FINE_TUNING',
-                    trainingDataConfig={'s3Uri':train_uri},outputDataConfig={'s3Uri':out_uri},
-                    clientRequestToken=state['client_request_token'])
+                resp=create_training_job(bedrock,state)
                 state['job_arn']=resp.get('jobArn');state['status']='InProgress';state['submitted_utc']=core.utc()
                 save_state(folder,'train',state)
                 run_meta(folder,'remote_training')
@@ -613,13 +636,15 @@ def recover_train(root,project,version,rid,*,factory=None):
             file=folder/'input/data/bedrock_training.jsonl'
             core.assert_snapshot(folder/'input')
             immutable_put(s3,file,state['training_s3_uri'],state['training_file_sha256'])
-            response=bedrock.create_model_customization_job(
-                jobName=state['job_name'],customModelName=state['custom_model_name'],
-                roleArn=state['role_arn'],baseModelIdentifier=state['base_model_id'],customizationType='FINE_TUNING',
-                trainingDataConfig={'s3Uri':state['training_s3_uri']},outputDataConfig={'s3Uri':state['output_s3_uri']},
-                clientRequestToken=state['client_request_token'])
+            # Older Nova 2 Lite receipts omitted the required map. Repair it only
+            # after AWS confirms that the original job name does not exist.
+            if not state.get('hyperparameters') and is_nova_2_lite(state['base_model_id']):
+                state['hyperparameters'] = training_hyperparameters(state['base_model_id'])
+                save_state(folder, 'train', state)
+            response=create_training_job(bedrock,state)
             state['job_arn']=response.get('jobArn')
             state['status']='InProgress'
+            state['submitted_utc']=core.utc()
         state['last_status_check_utc']=core.utc()
         save_state(folder,'train',state)
         run_meta(folder,'remote_training')
