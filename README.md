@@ -120,6 +120,9 @@ Weights, GGUF files, checkpoints, caches, and the local `.venv` are **not commit
 
 ## Documentation
 
+- [Bedrock Nova remote training and evaluation](docs/BEDROCK_NOVA.md)
+- [ELI 10 Nova runbook](docs/ELI_NOVA_RUNBOOK.md)
+
 - [Training a task-specific assistant](docs/TRAINING_TASK_SPECIFIC_ASSISTANTS.md) — concepts and end-to-end worked example
 - [Architecture](docs/ARCHITECTURE.md) — core ownership and data flow
 - [Data package contract](docs/DATA_PACKAGE_CONTRACT.md) — validated input format

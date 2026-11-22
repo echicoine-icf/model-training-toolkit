@@ -106,7 +106,12 @@ class SageMakerVllmTests(unittest.TestCase):
     def test_rejects_symlink(self):
         outside = self.root / 'sensitive'
         outside.write_text('secret')
-        (self.hf / 'linked').symlink_to(outside)
+        try:
+            (self.hf / 'linked').symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
         with self.assertRaisesRegex(ValueError, 'symlink'):
             package_model(self.root, 'eli', 'v9.2', 'run_fake', 'hf-f16', self.root / 'bad.tar.gz')
 

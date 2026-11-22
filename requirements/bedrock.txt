@@ -1,0 +1,2 @@
+# Optional remote Bedrock orchestration only; install in an isolated MTT environment.
+boto3>=1.40
