@@ -546,26 +546,49 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
     return rid
 
 
-def check_train(root,project,version,rid,*,factory=None):
-    folder=remote_run_dir(root,project,version,rid)
-    state=load_state(folder,'train')
-    cfg={'profile':state.get('profile'),'region':state['region']}
-    bedrock=verified_clients(state,factory)[0]
-    resp=bedrock.get_model_customization_job(jobIdentifier=state.get('job_arn') or state['job_name'])
-    with exclusive(folder,'train'):
-        state['last_status_check_utc']=core.utc()
-        state['status']=resp['status']
-        if resp.get('jobArn'):state['job_arn']=resp['jobArn']
-        if resp.get('outputModelArn'):state['custom_model_arn']=resp['outputModelArn']
-        if resp.get('failureMessage'):state['failure_reason']=resp['failureMessage']
-        save_state(folder,'train',state)
-        if state['status'].casefold()=='completed':
-            if not state.get('custom_model_arn'):
-                raise RuntimeError('Bedrock reports Completed without an outputModelArn')
-            run_meta(folder,'trained')
-        elif state['status'] in ('Failed','Stopped'):run_meta(folder,'remote_training_failed')
-    print('BEDROCK TRAIN',rid,state['status'],state.get('custom_model_arn') or state.get('failure_reason') or '')
+def find_training_job_arn(bedrock, job_name):
+    paginator = bedrock.get_paginator('list_model_customization_jobs')
+    for page in paginator.paginate(nameContains=job_name):
+        for job in page.get('modelCustomizationJobSummaries', []):
+            if job.get('jobName') == job_name:
+                if not job.get('jobArn'):
+                    raise RuntimeError(f'Bedrock listed job {job_name} without an ARN')
+                return job['jobArn']
+    return None
+
+
+def refresh_training_state(bedrock, folder, state, job_arn):
+    response = bedrock.get_model_customization_job(jobIdentifier=job_arn)
+    discovering_job = not state.get('job_arn')
+    state.update(job_arn=job_arn, status=response['status'], last_status_check_utc=core.utc())
+    if response.get('outputModelArn'):
+        state['custom_model_arn'] = response['outputModelArn']
+    if response.get('failureMessage'):
+        state['failure_reason'] = response['failureMessage']
+    save_state(folder, 'train', state)
+    if state['status'].casefold() == 'completed':
+        if not state.get('custom_model_arn'):
+            raise RuntimeError('Bedrock reports Completed without an outputModelArn')
+        run_meta(folder, 'trained')
+    elif state['status'] in ('Failed', 'Stopped'):
+        run_meta(folder, 'remote_training_failed')
+    elif discovering_job:
+        run_meta(folder, 'remote_training')
+    print('BEDROCK TRAIN',state['run_id'],state['status'],state.get('custom_model_arn') or state.get('failure_reason') or '')
     return state
+
+
+def check_train(root,project,version,rid,*,factory=None):
+    folder = remote_run_dir(root, project, version, rid)
+    if not state_path(folder, 'train').is_file():
+        raise FileNotFoundError(f"No train state at {state_path(folder, 'train')}")
+    with exclusive(folder, 'train'):
+        state = load_state(folder, 'train')
+        bedrock = verified_clients(state, factory)[0]
+        job_arn = state.get('job_arn') or find_training_job_arn(bedrock, state['job_name'])
+        if not job_arn:
+            raise RuntimeError(f"No Bedrock job found for {state['job_name']}; use recover to submit the saved run")
+        return refresh_training_state(bedrock, folder, state, job_arn)
 
 
 def watch(status_fn,done,interval=90):
@@ -619,35 +642,31 @@ def check_deploy(root,project,version,rid,*,factory=None):
 
 
 def recover_train(root,project,version,rid,*,factory=None):
-    """Recover after loss of response: query deterministic jobName, then replay same token if absent."""
-    folder=remote_run_dir(root,project,version,rid)
-    state=load_state(folder,'train')
-    if state.get('status') in TERMINAL_TRAIN or state.get('job_arn'):
-        return check_train(root,project,version,rid,factory=factory)
-    bedrock,s3,_,_,_=verified_clients(state,factory)
-    with exclusive(folder,'train'):
-        try:
-            resp=bedrock.get_model_customization_job(jobIdentifier=state['job_name'])
-            state['job_arn']=resp.get('jobArn')
-            state['status']=resp['status']
-        except Exception as ex:
-            if getattr(ex,'response',{}).get('Error',{}).get('Code') not in ('ResourceNotFoundException','404'):
-                raise
-            file=folder/'input/data/bedrock_training.jsonl'
-            core.assert_snapshot(folder/'input')
-            immutable_put(s3,file,state['training_s3_uri'],state['training_file_sha256'])
-            # Older Nova 2 Lite receipts omitted the required map. Repair it only
-            # after AWS confirms that the original job name does not exist.
-            if not state.get('hyperparameters') and is_nova_2_lite(state['base_model_id']):
-                state['hyperparameters'] = training_hyperparameters(state['base_model_id'])
-                save_state(folder, 'train', state)
-            response=create_training_job(bedrock,state)
-            state['job_arn']=response.get('jobArn')
-            state['status']='InProgress'
-            state['submitted_utc']=core.utc()
-        state['last_status_check_utc']=core.utc()
-        save_state(folder,'train',state)
-        run_meta(folder,'remote_training')
+    """Find the saved job by exact name, or replay the request with the same token."""
+    folder = remote_run_dir(root, project, version, rid)
+    if not state_path(folder, 'train').is_file():
+        raise FileNotFoundError(f"No train state at {state_path(folder, 'train')}")
+    with exclusive(folder, 'train'):
+        state = load_state(folder, 'train')
+        bedrock, s3, _, _, _ = verified_clients(state, factory)
+        job_arn = state.get('job_arn') or find_training_job_arn(bedrock, state['job_name'])
+        if job_arn:
+            return refresh_training_state(bedrock, folder, state, job_arn)
+        if state['status'] in TERMINAL_TRAIN:
+            raise RuntimeError(f"No Bedrock job found for terminal run {rid}")
+
+        file = folder / 'input/data/bedrock_training.jsonl'
+        core.assert_snapshot(folder / 'input')
+        immutable_put(s3, file, state['training_s3_uri'], state['training_file_sha256'])
+        # Older Nova 2 Lite receipts omitted the required map.
+        if not state.get('hyperparameters') and is_nova_2_lite(state['base_model_id']):
+            state['hyperparameters'] = training_hyperparameters(state['base_model_id'])
+            save_state(folder, 'train', state)
+        response = create_training_job(bedrock, state)
+        state.update(job_arn=response['jobArn'], status='InProgress', submitted_utc=core.utc())
+        save_state(folder, 'train', state)
+        run_meta(folder, 'remote_training')
+    print('BEDROCK TRAIN SUBMITTED RUN_ID',rid,'JOB',state['job_name'],'ARN',state['job_arn'])
     return state
 
 
