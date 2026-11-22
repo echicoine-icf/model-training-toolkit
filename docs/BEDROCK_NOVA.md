@@ -52,7 +52,7 @@ export MTT_BEDROCK_S3_BUCKET='<YOUR-BUCKET>'
 export MTT_BEDROCK_S3_PREFIX=eli
 ```
 
-The IAM user/profile needs STS identity, model customization and on-demand model deployment permissions, S3 write/head permissions, and `Converse` permissions for evaluation. Preflight requires `CountTokens` permission for models where MTT calls it. The Bedrock service role must be assumable by Bedrock and have the relevant input/output bucket/KMS permissions. Credentials, session tokens and access keys are not stored by MTT. Resume commands verify the current AWS account against the persisted account identity.
+The IAM user/profile needs STS identity, model customization permissions (including `bedrock:ListModelCustomizationJobs` to recover a missing job ARN), on-demand model deployment permissions, S3 write/head permissions, and `Converse` permissions for evaluation. Preflight requires `CountTokens` permission for models where MTT calls it. The Bedrock service role must be assumable by Bedrock and have the relevant input/output bucket/KMS permissions. Credentials, session tokens and access keys are not stored by MTT. Resume commands verify the current AWS account against the persisted account identity.
 
 ## Train: preflight, submit, status, recover
 
@@ -92,7 +92,7 @@ bash projects/eli/project.sh remote train status v10 --run "$RUN"
 bash projects/eli/project.sh remote train watch v10 --run "$RUN" --interval 90
 ```
 
-If the first submission lost its AWS response *after* saving a run, do **not** create another training run. Recover the deterministic remote job identity and idempotency token. For a staged Nova 2 Lite run from older MTT code that omitted hyperparameters, recovery fills in and records the defaults after Bedrock confirms the job does not exist:
+If the first submission lost its AWS response *after* saving a run, do **not** create another training run. Recover the deterministic remote job identity and idempotency token. When the ARN is missing, MTT lists customization jobs and checks the exact recorded job name. If the list contains no match, recovery replays the original request. For a staged Nova 2 Lite run from older MTT code, recovery also fills in and records the required hyperparameter defaults:
 
 ```bash
 bash projects/eli/project.sh remote train recover v10 --run "$RUN"

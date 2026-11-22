@@ -8,7 +8,7 @@ import tempfile
 import urllib.request
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from toolkit import core
 from toolkit import remote_bedrock as remote
@@ -315,11 +315,16 @@ class BedrockTests(unittest.TestCase):
             self.assertEqual(remote.load_state(folder, 'train')['hyperparameters'], expected)
             return FakeBedrock.create_model_customization_job(SessionFactory.bedrock, **kw)
 
-        with patch.object(SessionFactory.bedrock, 'get_model_customization_job',
-                          side_effect=AwsMissing('ResourceNotFoundException')) as lookup, \
+        paginator = Mock()
+        paginator.paginate.return_value = [{'modelCustomizationJobSummaries': [
+            {'jobName':original_name+'-other','jobArn':'arn:wrong'},
+        ]}]
+        with patch.object(SessionFactory.bedrock, 'get_paginator', return_value=paginator, create=True), \
+             patch.object(SessionFactory.bedrock, 'get_model_customization_job') as lookup, \
              patch.object(SessionFactory.bedrock, 'create_model_customization_job', side_effect=create):
             recovered = remote.recover_train(self.root, 'eli', 'v10', rid, factory=SessionFactory)
-        lookup.assert_called_once_with(jobIdentifier=original_name)
+        paginator.paginate.assert_called_once_with(nameContains=original_name)
+        lookup.assert_not_called()
         request, = SessionFactory.bedrock.created
         self.assertEqual(request['jobName'], original_name)
         self.assertEqual(request['clientRequestToken'], original_token)
@@ -328,6 +333,40 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(len(SessionFactory.s3.objects), 1)
         self.assertEqual(recovered['status'], 'InProgress')
         self.assertTrue(recovered['submitted_utc'])
+
+    def test_resolve_job_arn_from_a_later_page_for_status_and_recovery(self):
+        rid = self.submitted()
+        folder = self.root/'runs/eli/v10'/rid
+        state = remote.load_state(folder, 'train')
+        arn, name = state['job_arn'], state['job_name']
+        paginator = Mock()
+        paginator.paginate.return_value = [
+            {'modelCustomizationJobSummaries': [{'jobName':name+'-other','jobArn':'arn:wrong'}]},
+            {'modelCustomizationJobSummaries': [{'jobName':name,'jobArn':arn}]},
+        ]
+        for action in (remote.check_train, remote.recover_train):
+            with self.subTest(action=action.__name__):
+                remote.save_state(folder, 'train', dict(state, status='Staged', job_arn=None))
+                with patch.object(SessionFactory.bedrock, 'get_paginator', return_value=paginator, create=True), \
+                     patch.object(SessionFactory.bedrock, 'get_model_customization_job',
+                                  wraps=SessionFactory.bedrock.get_model_customization_job) as lookup, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    refreshed = action(self.root, 'eli', 'v10', rid, factory=SessionFactory)
+                lookup.assert_called_once_with(jobIdentifier=arn)
+                self.assertEqual(refreshed['job_arn'], arn)
+                self.assertEqual(len(SessionFactory.bedrock.created), 1)
+
+    def test_failed_job_listing_never_submits(self):
+        rid = self.submitted()
+        folder = self.root/'runs/eli/v10'/rid
+        state = remote.load_state(folder, 'train')
+        remote.save_state(folder, 'train', dict(state, status='Staged', job_arn=None))
+        paginator = Mock()
+        paginator.paginate.side_effect = AwsMissing('AccessDeniedException')
+        with patch.object(SessionFactory.bedrock, 'get_paginator', return_value=paginator, create=True):
+            with self.assertRaises(AwsMissing):
+                remote.recover_train(self.root, 'eli', 'v10', rid, factory=SessionFactory)
+        self.assertEqual(len(SessionFactory.bedrock.created), 1)
 
     def test_completion_and_failure(self):
         rid=self.submitted()
