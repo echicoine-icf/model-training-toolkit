@@ -12,7 +12,7 @@ This runbook supplements `docs/BEDROCK_NOVA.md`; keep the exact DATMM production
 
 ## Release process
 
-1. Run offline and then remote-tokenized training preflight. Validate 8–20,000 rows, message alternation, reserved literals, 32K training-example token limits, exact system-prompt hash, overlap, and protected-file hashes.
+1. Run offline and then AWS preflight. Validate 8–20,000 rows, message alternation, reserved literals, the exact system-prompt hash, overlap, and protected-file hashes. Nova 2 Lite has no Bedrock Runtime token-counting support. MTT reports the 32K training-example context limit as unverified until Bedrock validates the job.
 2. Submit once with `--apply`; record printed run ID and Bedrock job ARN. `remote train status`, `watch`, or `recover` must reference the **same run**. Do not create an independent AWS job after a lost terminal session.
 3. Once `Completed`, confirm the resulting custom model ARN and the `runs/eli/v10/<run>/remote/train.json` provenance.
 4. Deploy the custom model on-demand, store the separate deployment ARN, and check for `Active`.

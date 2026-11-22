@@ -15,10 +15,10 @@ This is an **additive optional backend**, not a replacement for MTT's PyTorch/Un
 Create ELI v10 only if not already present (the command refuses to overwrite an existing version):
 
 ```bash
-bash workspace.sh remote version init eli v10
+bash workspace.sh remote version init eli v10 --base-model-id amazon.nova-2-lite-v1:0:256k
 ```
 
-This creates `projects/eli/versions/v10/version.json` and the `data/` directory. Place the **exact production** `system_prompt.txt` in the version's `data` folder. The prepared Nova training JSONL is supplied with `--dataset`; MTT copies its **original bytes** into the new run snapshot without rewriting the SFT artifact. MTT separately derives a non-training `data/train.jsonl` question-index projection strictly for the existing benchmark overlap auditor.
+The optional `--base-model-id` flag sets the customization base model in the new version. This creates `projects/eli/versions/v10/version.json` and the `data/` directory. Place the **exact production** `system_prompt.txt` in the version's `data` folder. The prepared Nova training JSONL is supplied with `--dataset`; MTT copies its **original bytes** into the new run snapshot without rewriting the SFT artifact. MTT separately derives a non-training `data/train.jsonl` question-index projection strictly for the existing benchmark overlap auditor.
 
 Suggested `remote.bedrock` object inside `version.json` (keep unrelated version fields):
 
@@ -52,13 +52,13 @@ export MTT_BEDROCK_S3_BUCKET='<YOUR-BUCKET>'
 export MTT_BEDROCK_S3_PREFIX=eli
 ```
 
-The IAM user/profile needs STS identity, model customization and on-demand model deployment permissions, S3 write/head permissions, Bedrock `CountTokens`, and `Converse` permissions. The Bedrock service role must be assumable by Bedrock and have the relevant input/output bucket/KMS permissions. Credentials, session tokens and access keys are not stored by MTT. Resume commands verify the current AWS account against the persisted account identity.
+The IAM user/profile needs STS identity, model customization and on-demand model deployment permissions, S3 write/head permissions, and `Converse` permissions for evaluation. Preflight requires `CountTokens` permission for models where MTT calls it. The Bedrock service role must be assumable by Bedrock and have the relevant input/output bucket/KMS permissions. Credentials, session tokens and access keys are not stored by MTT. Resume commands verify the current AWS account against the persisted account identity.
 
 ## Train: preflight, submit, status, recover
 
 All commands below are examples; replace the dataset and benchmark paths with ELI 10's actual frozen artifacts.
 
-Offline validation (no AWS calls, not sufficient for `--apply`):
+Offline validation (no AWS calls):
 
 ```bash
 bash projects/eli/project.sh remote train preflight v10 \
@@ -66,7 +66,7 @@ bash projects/eli/project.sh remote train preflight v10 \
   --benchmark benchmark-v1.0.2 --skip-token-check
 ```
 
-Complete validation (makes **read-only** AWS CountTokens calls, per example, to check the 32K training limit):
+AWS preflight verifies the account using STS. For countable models, it also checks the 32K training limit per example using Bedrock `CountTokens`. For Nova 2 Lite, MTT reports context length as unverified:
 
 ```bash
 bash projects/eli/project.sh remote train preflight v10 \
@@ -151,7 +151,7 @@ Outputs remain under `runs/eli/v10/<run>/shared_evaluations/<benchmark>/<model-t
 
 1. **Source-based compatibility:** The MTT core contract was inspected on public main 0.4.1. ELI's real v10 benchmark runner and new frozen data packages were not available in this environment. The localhost bridge must be integration-tested with those exact assets before a 977-case/full ELI10 evaluation. It implements Ollama `api/show`, `api/tags`, `api/generate` and `api/chat` non-streaming endpoints; unsupported paths deliberately fail rather than fabricate outputs.
 2. **Text-only training:** Preflight currently fails on unsupported multimedia, reasoning, tool-call or mixed-modality records instead of silently discarding them. ELI's current text-only schema-to-SPARQL task should fit. Add validated formats explicitly if needed.
-3. **Token checks:** Full submission makes a Bedrock `CountTokens` request for each JSONL line; this may require substantial time and account quotas. Offline `--skip-token-check` is preflight-only and **cannot** authorize a real job. If Bedrock rejects `CountTokens` on the customization model ID, configure the inference-compatible `count_model_id` (typically `amazon.nova-2-lite-v1:0`) explicitly. CountTokens validates input tokens; AWS's own fine-tuning validators remain final for other task-specific limits.
+3. **Token checks:** [Nova 2 Lite does not support Bedrock Runtime CountTokens](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-lite.html). MTT runs all structural and contamination checks, records token counts as unverified, and leaves the 32K context check to Bedrock customization. This also applies if `--count-model-id` is supplied for Nova 2 Lite. Other models retain the per-record `CountTokens` check with the configured count-model ID. The offline `--skip-token-check` flag is accepted only without `--apply`.
 4. **Protected corpora:** The overlap preflight extracts natural-language questions from supported JSON/JSONL structures and verifies frozen release hashes. Unknown formats fail closed. Make sure *every* ELI10 protected evaluation layer is declared or registered; the existing general shared benchmark does not automatically include new cross-entity/reference/help-panel tests.
 5. **Managed Bedrock evaluation:** Intentionally not used for ELI's semantic correctness. A future optional managed job can use a separate durable job-state type without replacing benchmark definitions. No managed-eval job is claimed to exist in this release.
 6. **Destructive cleanup:** On-demand deployment deletion and S3 artifact retention are explicit infrastructure management operations and are not automated by this code.
