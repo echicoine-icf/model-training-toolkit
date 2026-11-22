@@ -18,7 +18,7 @@ Create ELI v10 only if not already present (the command refuses to overwrite an 
 bash workspace.sh remote version init eli v10 --base-model-id amazon.nova-2-lite-v1:0:256k
 ```
 
-The optional `--base-model-id` flag sets the customization base model in the new version. This creates `projects/eli/versions/v10/version.json` and the `data/` directory. Place the **exact production** `system_prompt.txt` in the version's `data` folder. The prepared Nova training JSONL is supplied with `--dataset`; MTT copies its **original bytes** into the new run snapshot without rewriting the SFT artifact. MTT separately derives a non-training `data/train.jsonl` question-index projection strictly for the existing benchmark overlap auditor.
+The optional `--base-model-id` flag sets the customization base model in the new version. This creates `projects/eli/versions/v10/version.json` and the `data/` directory. Place the **exact production** `system_prompt.txt` in the version's `data` folder. The prepared Nova training JSONL is supplied with `--dataset`; MTT copies its **original bytes** into the new run snapshot without rewriting the SFT artifact. For the benchmark overlap auditor, MTT derives a question-and-answer projection. An existing `data/train.jsonl` is preserved byte-for-byte in the run snapshot when its questions and expected answers match the Bedrock corpus. Row IDs, metadata, and ordering may differ.
 
 Suggested `remote.bedrock` object inside `version.json` (keep unrelated version fields):
 
