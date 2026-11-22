@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import core
+from .dataset import rows as dataset_rows
 
 FORMAT = 'mtt-bedrock-nova-sft-v1'
 NOVA_2_LITE_RUNTIME_MODEL = 'amazon.nova-2-lite-v1:0'
@@ -340,6 +341,14 @@ def ensure_version(root, project, version, *, base_model_id=DEFAULT_MODEL):
     return v
 
 
+def validate_existing_audit(path, audit):
+    """Match SFT questions and labels while allowing source IDs and metadata."""
+    supplied = {row['question']: json_sha(row['expected']) for row in dataset_rows(path)}
+    projected = {row['question']: json_sha(row['expected']) for row in audit}
+    if supplied != projected:
+        raise ValueError(f'{path}: questions or expected answers differ from the Bedrock training dataset')
+
+
 def create_snapshot(root,project,version,run_id,data,prompt,audit):
     folder=remote_run_dir(root,project,version,run_id)
     if folder.exists():raise FileExistsError(f'Run already exists: {folder}')
@@ -356,9 +365,10 @@ def create_snapshot(root,project,version,run_id,data,prompt,audit):
     else:shutil.copyfile(prompt,frozen_prompt)
     audit_path=snap/'data'/'train.jsonl'
     if audit_path.exists():
-        raise ValueError('Existing MTT train.jsonl conflicts with remote audit projection; use a remote-only version')
-    with audit_path.open('w',encoding='utf-8',newline='\n') as f:
-        for row in audit:f.write(json.dumps(row,ensure_ascii=False)+'\n')
+        validate_existing_audit(audit_path, audit)
+    else:
+        with audit_path.open('x',encoding='utf-8',newline='\n') as f:
+            for row in audit:f.write(json.dumps(row,ensure_ascii=False)+'\n')
     hashes=core.read(snap/'input_hashes.json')
     for file in (sft,frozen_prompt,audit_path):
         hashes[file.relative_to(snap).as_posix()]=core.digest(file)
@@ -442,6 +452,9 @@ def submit(root,project,version,dataset,prompt_file,*,benchmark_names=(),protect
     counter = None if skip_token_check or is_nova_2_lite else runtime.count_tokens
     count_model_id = (cfg.get('count_model_id') or cfg['base_model_id'].replace(':256k', '')) if counter else None
     checked,audit=preflight(dataset,prompt_file,protected,count_tokens=counter,count_model_id=count_model_id)
+    existing_audit = version_location(root, project, version) / 'data/train.jsonl'
+    if existing_audit.exists():
+        validate_existing_audit(existing_audit, audit)
     if is_nova_2_lite:
         checked['token_validation_reason'] = (
             'Nova 2 Lite does not support Bedrock Runtime CountTokens. No verified compatible '

@@ -258,6 +258,33 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(state['token_validation'],'not-verified')
         self.assertIn('does not support',state['token_validation_reason'])
 
+    def test_submit_freezes_matching_existing_train_jsonl_unchanged(self):
+        audit = self.preflight()[1]
+        canonical = self.v / 'data/train.jsonl'
+        records = [dict(row, id=f'curated_{i}', source='catalog') for i, row in enumerate(reversed(audit))]
+        original = ''.join(json.dumps(row) + '\n' for row in records).encode('utf-8')
+        canonical.write_bytes(original)
+
+        rid = self.submitted()
+        snapshot = self.root / 'runs/eli/v10' / rid / 'input'
+        self.assertEqual(canonical.read_bytes(), original)
+        self.assertEqual((snapshot/'data/train.jsonl').read_bytes(), original)
+        self.assertEqual((snapshot/'data/bedrock_training.jsonl').read_bytes(), self.data.read_bytes())
+        self.assertEqual(core.assert_snapshot(snapshot)['data/train.jsonl'], core.digest(canonical))
+
+    def test_mismatching_existing_train_jsonl_stops_before_snapshot_or_upload(self):
+        audit = self.preflight()[1]
+        canonical = self.v / 'data/train.jsonl'
+        for key, value in (('question', 'A different question'), ('expected', {'plan':'wrong'})):
+            with self.subTest(key=key):
+                rows = [dict(audit[0], **{key:value}), *audit[1:]]
+                canonical.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'questions or expected answers differ'):
+                    self.submitted()
+                self.assertFalse((self.root/'runs').exists())
+                self.assertEqual(SessionFactory.s3.objects, {})
+                self.assertEqual(SessionFactory.bedrock.created, [])
+
     def test_duplicate_submission_protected(self):
         self.submitted()
         with self.assertRaisesRegex(RuntimeError,'already submitted'):self.submitted()
