@@ -255,6 +255,9 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(SessionFactory.runtime.requests,[])
         self.assertEqual(SessionFactory.bedrock.created[0]['baseModelIdentifier'],remote.DEFAULT_MODEL)
         self.assertEqual(state['base_model_id'],remote.DEFAULT_MODEL)
+        expected_parameters = {'epochCount':'2','learningRate':'0.00001','learningRateWarmupSteps':'10'}
+        self.assertEqual(SessionFactory.bedrock.created[0]['hyperParameters'], expected_parameters)
+        self.assertEqual(state['hyperparameters'], expected_parameters)
         self.assertEqual(state['token_validation'],'not-verified')
         self.assertIn('does not support',state['token_validation_reason'])
 
@@ -295,6 +298,36 @@ class BedrockTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):state=remote.recover_train(self.root,'eli','v10',rid,factory=SessionFactory)
         self.assertEqual(state['status'],'InProgress')
         self.assertEqual(len(SessionFactory.bedrock.created),1)
+
+    def test_recover_staged_nova_run_repairs_missing_parameters_without_duplicate_upload(self):
+        rid = self.submitted()
+        folder = self.root/'runs/eli/v10'/rid
+        state = remote.load_state(folder, 'train')
+        original_token, original_uri = state['client_request_token'], state['training_s3_uri']
+        original_name = state['job_name']
+        state.update(status='Staged', job_arn=None, hyperparameters={})
+        state.pop('submitted_utc', None)
+        remote.save_state(folder, 'train', state)
+        SessionFactory.bedrock.created.clear()
+        expected = {'epochCount':'2','learningRate':'0.00001','learningRateWarmupSteps':'10'}
+
+        def create(**kw):
+            self.assertEqual(remote.load_state(folder, 'train')['hyperparameters'], expected)
+            return FakeBedrock.create_model_customization_job(SessionFactory.bedrock, **kw)
+
+        with patch.object(SessionFactory.bedrock, 'get_model_customization_job',
+                          side_effect=AwsMissing('ResourceNotFoundException')) as lookup, \
+             patch.object(SessionFactory.bedrock, 'create_model_customization_job', side_effect=create):
+            recovered = remote.recover_train(self.root, 'eli', 'v10', rid, factory=SessionFactory)
+        lookup.assert_called_once_with(jobIdentifier=original_name)
+        request, = SessionFactory.bedrock.created
+        self.assertEqual(request['jobName'], original_name)
+        self.assertEqual(request['clientRequestToken'], original_token)
+        self.assertEqual(request['trainingDataConfig']['s3Uri'], original_uri)
+        self.assertEqual(request['hyperParameters'], expected)
+        self.assertEqual(len(SessionFactory.s3.objects), 1)
+        self.assertEqual(recovered['status'], 'InProgress')
+        self.assertTrue(recovered['submitted_utc'])
 
     def test_completion_and_failure(self):
         rid=self.submitted()

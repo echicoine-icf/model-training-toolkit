@@ -82,7 +82,7 @@ bash projects/eli/project.sh remote train submit v10 \
   --benchmark benchmark-v1.0.2 --apply
 ```
 
-Submission prints `RUN_ID`, AWS identity/region, customization job ARN/name, and records `runs/eli/v10/<RUN_ID>/remote/train.json`. Each S3 training URI contains the run ID and SHA-256, and upload uses `IfNoneMatch='*'` plus metadata/length verification. The original dataset and exact frozen prompt are hashed into `input/input_hashes.json`. Hyperparameters are **omitted** on first Nova SFT submission so AWS defaults apply; the recorded explicit hyperparameter map is `{}`.
+Submission prints `RUN_ID`, AWS identity/region, customization job ARN/name, and records `runs/eli/v10/<RUN_ID>/remote/train.json`. Each S3 training URI contains the run ID and SHA-256, and upload uses `IfNoneMatch='*'` plus metadata/length verification. The original dataset and exact frozen prompt are hashed into `input/input_hashes.json`. MTT explicitly sends the Nova 2 Lite SFT defaults required by Bedrock: two epochs, a learning rate of `0.00001`, and ten warmup steps. The exact parameter map is recorded in the run receipt and shown in preflight.
 
 After the terminal is closed or restarted:
 
@@ -92,7 +92,7 @@ bash projects/eli/project.sh remote train status v10 --run "$RUN"
 bash projects/eli/project.sh remote train watch v10 --run "$RUN" --interval 90
 ```
 
-If the first submission lost its AWS response *after* saving a run, do **not** create another training run. Recover the deterministic remote job identity and idempotency token:
+If the first submission lost its AWS response *after* saving a run, do **not** create another training run. Recover the deterministic remote job identity and idempotency token. For a staged Nova 2 Lite run from older MTT code that omitted hyperparameters, recovery fills in and records the defaults after Bedrock confirms the job does not exist:
 
 ```bash
 bash projects/eli/project.sh remote train recover v10 --run "$RUN"
