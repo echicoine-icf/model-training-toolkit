@@ -13,7 +13,7 @@ from toolkit.data_package import initialize, inspect, validate_package, assistan
 from toolkit import workspace_state
 
 
-PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n quantize) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh quantize VERSION --run RUN_ID --format FORMAT\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" quantize "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|quantize VERSION --run ID --format FORMAT|shared-eval VERSION --run ID --benchmark NAME|status|handoff}\' ;;\nesac\n'
+PROJECT_LAUNCHER = '#!/usr/bin/env bash\nset -Eeuo pipefail\nP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$P/../.." && pwd)"\nNAME="$(basename "$P")"\nACTION="${1:-help}"\nshift || true\ncase "$ACTION" in\n new-version) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh new-version VERSION\' >&2; exit 2; }; exec bash "$ROOT/workspace.sh" version create "$NAME" "$@" ;;\n train) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh train VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" train "$NAME" "$v" "$@" ;;\n resume) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh resume VERSION --run RUN_ID\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" resume "$NAME" "$v" "$@" ;;\n evaluate) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh evaluate VERSION\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" evaluate "$NAME" "$v" "$@" ;;\n quantize) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh quantize VERSION --run RUN_ID --format FORMAT\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" quantize "$NAME" "$v" "$@" ;;\n shared-eval) [[ $# -ge 1 ]] || { echo \'Usage: bash project.sh shared-eval VERSION --run RUN_ID --benchmark NAME\' >&2; exit 2; }; v="$1"; shift; exec bash "$ROOT/workspace.sh" shared-eval "$NAME" "$v" "$@" ;;\n remote) [[ $# -ge 3 ]] || { echo "Usage: project.sh remote KIND ACTION VERSION [flags]" >&2; exit 2; }; kind="$1"; op="$2"; v="$3"; shift 3; exec bash "$ROOT/workspace.sh" remote "$kind" "$op" "$NAME" "$v" "$@" ;;\n status) exec bash "$ROOT/workspace.sh" status "$NAME" "$@" ;;\n handoff) exec bash "$ROOT/workspace.sh" handoff "$NAME" ;;\n *) echo \'Usage: bash project.sh {new-version VERSION|train VERSION|resume VERSION --run ID|evaluate VERSION [--run ID]|quantize VERSION --run ID --format FORMAT|shared-eval VERSION --run ID --benchmark NAME|remote KIND ACTION VERSION [flags]|status|handoff}\' ;;\nesac\n'
 
 def scaffold_project_launcher(dest):
     dest=Path(dest)
@@ -517,7 +517,7 @@ def upgrade():
             versions=project/'versions'
             if versions.is_dir():
                 for folder in versions.iterdir():
-                    if (folder/'version.json').exists() and migrate_legacy(folder):
+                    if (folder/'version.json').exists() and read(folder/'version.json').get('initialization')!='remote_customization' and migrate_legacy(folder):
                         print('MIGRATED DATA CONTRACT (preserved original files):',folder)
     # Refresh metadata only after all upgrade operations completed successfully.
     result,backup,_=workspace_state.repair(ROOT,upgrade=True)
@@ -743,6 +743,8 @@ def main():
     a=sub.add_parser('compare');a.add_argument('project');a.add_argument('versions',nargs='+')
     a=sub.add_parser('runs');a.add_argument('--project')
     a=sub.add_parser('handoff');a.add_argument('project')
+    from toolkit.remote_bedrock import add_arguments as add_remote_arguments
+    add_remote_arguments(sub)
     a=p.parse_args()
     try:
         if a.command=='doctor':doctor(repair=a.repair)
@@ -785,6 +787,9 @@ def main():
         elif a.command=='compare':compare(a.project,a.versions)
         elif a.command=='runs':list_runs(a.project)
         elif a.command=='handoff':handoff(a.project)
+        elif a.command=='remote':
+            from toolkit.remote_bedrock import dispatch
+            dispatch(a,root=ROOT)
     except KeyboardInterrupt:
         print('INTERRUPTED. Resume this same run with: bash workspace.sh resume PROJECT VERSION --run RUN_ID',file=sys.stderr)
         return 130
